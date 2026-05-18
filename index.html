@@ -3927,14 +3927,29 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     if (!rosterIsReady()) { showToast('Wait for roster to finish loading', 'error'); return; }
     const ranked = autoTabulate(state.roster, 100);
     if (!ranked.length) { showToast('No R/M cards found in roster', 'error'); return; }
+    const previousCount = state.spots.length;
+    // Confirm before nuking a non-empty spot list — Auto-Tabulate is a replace, not an append.
+    if (previousCount > 0) {
+      const ok = confirm(`Auto-Tabulate will replace your current ${previousCount} spot${previousCount === 1 ? '' : 's'} with ${ranked.length} new ones ranked by value × frequency.\n\nContinue?`);
+      if (!ok) return;
+    }
+    state.spots = [];
+    // Reset spot IDs so #1 starts at 1 again (cosmetic — keeps the spot numbers tidy).
+    state.nextSpotId = 1;
+    state.hitSpots.clear();
+    let added = 0;
     for (const r of ranked) {
       const parsed = parseSpotLabel(r.name);
-      if (parsed.length) state.spots.push({ id: state.nextSpotId++, label: r.name, parsed });
+      if (parsed.length) {
+        state.spots.push({ id: state.nextSpotId++, label: r.name, parsed });
+        added++;
+      }
     }
     renderSpots();
     updateButtonStates();
     refreshAnalysisIfReady();
-    showToast(`Auto-added ${ranked.length} spots ranked by value × frequency`, 'success');
+    const replacedNote = previousCount > 0 ? ` (replaced ${previousCount} previous spot${previousCount === 1 ? '' : 's'})` : '';
+    showToast(`Auto-added ${added} spots ranked by value × frequency${replacedNote}`, 'success');
   }
 
   function renderSpots() {
