@@ -332,7 +332,16 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
 /* ─── Kindred spot list + tracker table ─── */
 .spots-list { max-height: 460px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.25rem; padding: 0.15rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-secondary); }
-.spots-list:empty::after { content: 'No spots defined yet. Add one above, paste a list, or click Auto-Tabulate.'; color: var(--text-muted); font-size: 0.85rem; padding: 0.75rem; }
+.spots-list:empty::after { content: 'No spots defined yet. Click Seed Categories above to bootstrap with auto-detected categories, then split/merge to refine.'; color: var(--text-muted); font-size: 0.85rem; padding: 0.75rem; }
+.spot-item .spot-check { margin: 0 0.3rem 0 0; cursor: pointer; }
+/* Locked roster — visually grey out everything except the unlock bar */
+.card-body.roster-locked > *:not(.roster-lock-bar) { opacity: 0.4; pointer-events: none; user-select: none; }
+.card-body.roster-locked .roster-lock-bar { background: rgba(255, 180, 80, 0.08); border-color: rgba(255, 180, 80, 0.35); }
+.spot-item .spot-label.merged { color: var(--accent); font-weight: 600; }
+.spot-item .split-menu { padding: 0.15rem 0.25rem; font-size: 0.78rem; max-width: 75px; }
+#spots-count.on-target  { color: var(--success); font-weight: 600; }
+#spots-count.near-target { color: var(--warning); }
+#spots-count.off-target { color: var(--text-muted); }
 .spot-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.65rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.875rem; cursor: grab; transition: border-color var(--transition), background var(--transition); }
 .spot-item:active { cursor: grabbing; }
 .spot-item.drag-over { border-color: var(--accent); background: var(--accent-bg); }
@@ -532,6 +541,10 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
           <span id="total-packs">Total Packs/Drops: 0</span>
           <span id="total-cards-est">Est. Cards: 0</span>
         </div>
+        <div class="roster-lock-bar" style="margin-top:1rem; padding:0.75rem; background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-sm); display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap">
+          <button id="lock-roster-btn" class="btn btn-primary" disabled title="Done adding products? Click to compute EVs and auto-populate the Define Your Spots section. You can unlock later to add more products.">&#x1F512; Lock Roster &amp; Seed Spots</button>
+          <span id="lock-roster-status" class="spot-note" style="margin:0">Add products above, then lock the roster to auto-populate your spots.</span>
+        </div>
       </div>
     </section>
 
@@ -550,17 +563,26 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
           <button id="add-spot-btn" class="btn btn-primary">+ Add</button>
         </div>
         <details class="break-pitch" style="margin-top:0.6rem">
-          <summary><span class="pitch-summary-text">Bulk paste &amp; Auto-Tabulate</span></summary>
+          <summary><span class="pitch-summary-text">Bulk paste &amp; Auto-Tabulate (legacy)</span></summary>
           <div class="break-pitch-body" style="padding-top:0.6rem">
-            <p>Paste one spot per line. Auto-Tabulate scans the roster's R/M cards and proposes spots ranked by total value &times; frequency.</p>
+            <p>Paste one spot per line. Or use Auto-Tabulate (legacy) — ranks by value &times; frequency. For the interactive flow most streamers want, use <strong>Seed Categories</strong> below.</p>
             <textarea id="mass-entry" rows="5" placeholder="Dragon&#10;Wizard&#10;Snake/Snail&#10;White Human&#10;Blue Human&#10;Legendary Enchantment&#10;Equipment&#10;Class/Saga/Case&#10;Enchantment excluding creature and legendary" style="margin-bottom:0.5rem"></textarea>
             <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
               <button id="parse-mass-btn" class="btn btn-sm">Parse &amp; Add</button>
-              <button id="auto-tabulate-btn" class="btn btn-sm" disabled>&#x26A1; Auto-Tabulate from Roster</button>
+              <button id="auto-tabulate-btn" class="btn btn-sm" disabled>&#x26A1; Auto-Tabulate (legacy)</button>
             </div>
           </div>
         </details>
-        <div id="spots-list" class="spots-list" style="margin-top:0.85rem"></div>
+        <div class="spot-builder-toolbar" style="display:flex;flex-wrap:wrap;align-items:center;gap:0.6rem;margin:0.85rem 0 0.4rem;padding:0.55rem 0.7rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm)">
+          <span class="spot-note" style="margin:0">Use <strong>Lock Roster &amp; Seed Spots</strong> above to auto-populate from your roster.</span>
+          <span class="spot-spacer" style="flex:1"></span>
+          <span class="spot-note" style="margin:0">Sort:</span>
+          <button id="sort-spots-ev-btn"    class="btn btn-sm" disabled>by EV</button>
+          <button id="sort-spots-alpha-btn" class="btn btn-sm" disabled>A&ndash;Z</button>
+          <button id="sort-spots-type-btn"  class="btn btn-sm" disabled>by Type</button>
+          <button id="merge-spots-btn"      class="btn btn-sm" disabled>Merge Selected</button>
+        </div>
+        <div id="spots-list" class="spots-list" style="margin-top:0.5rem"></div>
         <div id="missing-spots-panel" class="hidden" style="margin-top:0.6rem">
           <p class="spot-note" style="margin-bottom:0.35rem"><strong>Missing categories:</strong> R/M cards in your roster that no current spot claims. Click + to add as a new spot at the end of your list.</p>
           <div id="missing-spots-list" style="display:flex;flex-wrap:wrap;gap:0.35rem"></div>
@@ -2221,6 +2243,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   const SUPERTYPES  = new Set(['legendary','basic','snow','world','tribal','kindred']);
   const CARD_TYPES  = new Set(['creature','artifact','enchantment','instant','sorcery','land','planeswalker','battle','tribal','kindred']);
 
+  // Tokens that look like subtypes in mis-parsed MDFC / aggregate type lines
+  // but aren't real creature subtypes — supertypes, card types, separators.
+  // Used by seedCategoryLabels to filter junk out of the tribe seed.
+  const NON_TRIBE_TOKENS = new Set([
+    ...SUPERTYPES, ...CARD_TYPES,
+    '//', '—', '-', '|', 'a-', '?',
+    'token', 'summon',  // older card-text artifacts
+  ]);
+
   /**
    * Parse a spot label into an OR-array of clauses.
    * @returns {Array<{includes: string[], excludes: string[]}>}
@@ -2232,7 +2263,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
 
   function parseClause(clause) {
-    let s = clause.toLowerCase().trim();
+    // Strip parentheses entirely — they're cosmetic ("Land (excluding Creature)" reads
+    // better but parses the same as "Land excluding Creature").
+    let s = clause.toLowerCase().trim().replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
     // Detect "excluding"/"except" — everything after becomes excludes
     const exclMatch = s.match(/\b(excluding|except)\b/);
     let includesText = s;
@@ -2680,7 +2713,14 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
   const COLOR_NAME_BY_CODE = { W: 'White', U: 'Blue', B: 'Black', R: 'Red', G: 'Green' };
   const NON_CREATURE_FALLBACK_TYPES = ['Saga', 'Class', 'Case', 'Equipment', 'Aura', 'Vehicle', 'Background', 'Attraction', 'Contraption'];
-  const CARD_TYPE_FALLBACKS = ['Sorcery', 'Instant', 'Planeswalker', 'Battle', 'Land'];
+  // Card-type buckets considered as catch-all candidates. Artifact and Enchantment
+  // are included even though many cards of those types ALSO have a subtype (Equipment,
+  // Saga, Aura, Class, Case, etc.) that gets its own candidate — because "Artifact" /
+  // "Enchantment" are common high-value spots in any break and many cards of those
+  // types are vanilla (Sol Ring, Necropotence, etc.) and would otherwise fall through
+  // to no bucket at all. The user can manually reorder so subtypes (Equipment, Saga)
+  // sit above the catch-all (Artifact, Enchantment) in priority.
+  const CARD_TYPE_FALLBACKS = ['Sorcery', 'Instant', 'Planeswalker', 'Battle', 'Land', 'Artifact', 'Enchantment'];
 
   /**
    * Build a rich spot list from the roster, targeting up to maxSpots entries.
@@ -2836,6 +2876,393 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return filtered;
   }
 
+  // ─── Interactive Spot Builder (seed + split) ────────────────────────────────
+  //
+  // seedCategoryLabels: returns the user-friendly initial categorization for the
+  // roster — non-creature card types in a fixed order, then every creature tribe
+  // present, all sorted by total R/M value descending. Used to bootstrap the
+  // spot list before the user starts splitting/merging.
+  //
+  // splitLabelsBy: for a given spot label + dimension (color / supertype / subtype),
+  // returns the resulting sub-labels that have ≥1 matching R/M card. Used by the
+  // per-row "Split…" menu.
+  //
+  // Both functions return arrays of { label, count, value } — count is the R/M
+  // card count, value is the TCGPlayer Market value summed across all matching
+  // R/M cards in the pool (weighted by booster probability for sealed product).
+
+  // Walk the roster's R/M cards exactly once. Calls cb(card, value) for each.
+  function forEachRMCard(rosterEntries, cb) {
+    for (const entry of rosterEntries) {
+      if (entry.productType === 'secret_lair') {
+        const finish = entry.finish || (entry.foil ? 'foil' : 'nonfoil');
+        for (const card of (entry.dropCards || [])) {
+          if (card.rarity === 'common' || card.rarity === 'uncommon') continue;
+          cb(card, getCardPrice(card, finish) * entry.quantity);
+        }
+        continue;
+      }
+      if (entry.productType === 'commander_precon') {
+        for (const card of (entry.deckCards || [])) {
+          if (card.rarity === 'common' || card.rarity === 'uncommon') continue;
+          const isFoil = !!card.__isFoil;
+          cb(card, getCardPrice(card, isFoil) * entry.quantity);
+        }
+        continue;
+      }
+      const dist = distributionForEntry(entry);
+      if (!dist) continue;
+      const q = entry.quantity || 1;
+      for (const { card, probability, isFoil } of dist) {
+        cb(card, getCardPrice(card, isFoil ? 'foil' : 'nonfoil') * probability * q);
+      }
+    }
+  }
+
+  /**
+   * Initial category seed for the interactive spot builder.
+   *
+   * Returns an explicit list of "common Kindred Break spots" + every primary
+   * creature tribe present, all sorted by EV descending. Empty buckets (no R/M
+   * cards) are filtered out.
+   *
+   * The non-creature candidates have full exclusion clauses so the partition
+   * is clean regardless of where they end up in the streamer's final spot list:
+   *   - Land / Legendary Land are split (Cavern of Souls etc. are chase)
+   *   - Enchantment has its named subtype variants (Aura, Class, Case, Saga)
+   *     pulled out and excluded from the catch-all
+   *   - Artifact has Equipment/Vehicle/Legendary pulled out
+   *   - Instant/Sorcery/Battle/PW exclude !Creature to drop Adventure halves
+   *
+   * @returns Array<{ label, count, value, source }> sorted by value desc.
+   */
+  function seedCategoryLabels(rosterEntries) {
+    // Candidate structure: a base label + which exclusions to CONSIDER. Each
+    // exclusion is dropped if no card in the pool would actually be excluded
+    // by it — so "Sorcery !Creature" collapses to just "Sorcery" when there
+    // are no creature-typed Sorceries in the roster.
+    const NC_CANDIDATES = [
+      { base: 'Land',          considerEx: ['Creature', 'Legendary'] },
+      { base: 'Legendary Land', considerEx: ['Creature'] },
+      { base: 'Aura',           considerEx: [] },
+      { base: 'Saga',           considerEx: [] },
+      { base: 'Class',          considerEx: [] },
+      { base: 'Case',           considerEx: [] },
+      { base: 'Equipment',      considerEx: [] },
+      { base: 'Vehicle',        considerEx: [] },
+      { base: 'Legendary Artifact', considerEx: ['Creature', 'Equipment', 'Vehicle'] },
+      { base: 'Artifact',       considerEx: ['Creature', 'Legendary', 'Equipment', 'Vehicle'] },
+      { base: 'Legendary Enchantment', considerEx: ['Creature', 'Aura', 'Class', 'Case', 'Saga'] },
+      { base: 'Enchantment',    considerEx: ['Creature', 'Legendary', 'Aura', 'Class', 'Case', 'Saga'] },
+      { base: 'Instant',        considerEx: ['Creature'] },
+      { base: 'Sorcery',        considerEx: ['Creature'] },
+      { base: 'Battle',         considerEx: ['Creature'] },
+      { base: 'Planeswalker',   considerEx: ['Creature'] },
+    ];
+
+    // Subtypes that are NOT a real creature tribe even when they appear as the
+    // primary creature subtype. Saga Creatures like Mightstone's Animation,
+    // Equipment Creatures, etc. — route to the enchantment/artifact bucket.
+    const NON_TRIBE_CREATURE_SUBS = new Set([
+      'saga', 'aura', 'class', 'case', 'equipment', 'vehicle',
+    ]);
+
+    // STEP 1: for each candidate, figure out which considerEx exclusions are
+    // ACTUALLY NEEDED. An exclusion is necessary iff at least one card in the
+    // pool has BOTH the base term(s) AND the exclusion term on the SAME face.
+    //
+    // Same-face check is critical for Adventure cards: a Bonecrusher Giant has
+    // "Creature — Giant" on the front face and "Instant — Adventure" on the
+    // back. The aggregate type_line contains both, but the streamer wouldn't
+    // call that a "Sorcery Creature" — it's a Creature with a Sorcery half.
+    // So !Creature should NOT be added to "Sorcery" just because adventures
+    // happen to claim it via aggregate matching.
+    for (const c of NC_CANDIDATES) {
+      c.basePartsParsed = c.base.toLowerCase().split(/\s+/);
+      c.removedBy = {};
+      for (const ex of c.considerEx) c.removedBy[ex] = 0;
+      c.baseCount = 0;
+    }
+    forEachRMCard(rosterEntries, (card) => {
+      // Build the per-face type-line list (or just the aggregate for single-face).
+      const faceLines = [];
+      if (Array.isArray(card.card_faces) && card.card_faces.length > 0) {
+        for (const f of card.card_faces) if (f.type_line) faceLines.push(f.type_line.toLowerCase());
+      } else if (card.type_line) {
+        faceLines.push(card.type_line.toLowerCase());
+      }
+      if (faceLines.length === 0) return;
+      function faceContainsAll(face, terms) {
+        return terms.every(t => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`).test(face));
+      }
+      for (const c of NC_CANDIDATES) {
+        // baseMatch (aggregate) — does the card match the base label at all?
+        const baseMatch = c.basePartsParsed.every(t => termMatches(card, t));
+        if (!baseMatch) continue;
+        c.baseCount++;
+        // Exclusion check: same-face only. The exclusion is NEEDED if some
+        // single face contains all base terms AND the exclusion term.
+        for (const ex of c.considerEx) {
+          const exLower = ex.toLowerCase();
+          for (const face of faceLines) {
+            if (faceContainsAll(face, c.basePartsParsed) && faceContainsAll(face, [exLower])) {
+              c.removedBy[ex]++;
+              break;
+            }
+          }
+        }
+      }
+    });
+
+    // STEP 2: build the final candidate label list with only the needed exclusions.
+    for (const c of NC_CANDIDATES) {
+      const necessary = c.considerEx.filter(ex => c.removedBy[ex] > 0);
+      c.finalLabel = necessary.length === 0
+        ? c.base
+        : `${c.base} (excluding ${necessary.join(', ')})`;
+      c.parsed = parseSpotLabel(c.finalLabel);
+    }
+
+    // STEP 3: walk the pool AGAIN with the final labels to count EVs cleanly
+    // using priority-order partition (first match wins).
+    const tribeStats = new Map();
+    function routeToNcCandidate(card, value) {
+      for (const c of NC_CANDIDATES) {
+        if (cardMatchesSpot(card, c.parsed)) {
+          c.count = (c.count || 0) + 1;
+          c.value = (c.value || 0) + value;
+          return true;
+        }
+      }
+      return false;
+    }
+    forEachRMCard(rosterEntries, (card, value) => {
+      const typeLine = (card.type_line || '').toLowerCase();
+      const isCreature = typeLine.includes('creature');
+      if (isCreature) {
+        const sub = primaryCreatureSubtype(card);
+        if (sub && NON_TRIBE_CREATURE_SUBS.has(sub)) {
+          routeToNcCandidate(card, value);
+          return;
+        }
+        if (sub && !NON_TRIBE_TOKENS.has(sub)) {
+          const display = sub.charAt(0).toUpperCase() + sub.slice(1);
+          if (!tribeStats.has(display)) tribeStats.set(display, { count: 0, value: 0 });
+          const s = tribeStats.get(display);
+          s.count++; s.value += value;
+        }
+      } else {
+        routeToNcCandidate(card, value);
+      }
+    });
+
+    const out = [];
+    for (const c of NC_CANDIDATES) {
+      if ((c.count || 0) > 0) {
+        out.push({ label: c.finalLabel, count: c.count, value: c.value, source: 'cardType' });
+      }
+    }
+    for (const [label, s] of tribeStats.entries()) {
+      if (s.count > 0) out.push({ label, count: s.count, value: s.value, source: 'tribe' });
+    }
+    out.sort((a, b) => b.value - a.value);
+    return out;
+  }
+
+  /**
+   * Generate the sub-labels that result from splitting a spot by a given
+   * dimension. Sub-labels are filtered to those with ≥1 matching R/M card.
+   *
+   * @param {string} parentLabel - the original spot's label (e.g. "Instant")
+   * @param {string} dimension - 'color' | 'supertype' | 'subtype'
+   * @param {Object[]} rosterEntries
+   * @returns Array<{ label, count, value }>
+   */
+  function splitLabelsBy(parentLabel, dimension, rosterEntries) {
+    const candidates = candidateSplitLabels(parentLabel, dimension);
+    if (!candidates.length) return [];
+
+    // Score each candidate by walking the roster once. Parse the labels up front.
+    const parsedCands = candidates.map(label => ({ label, parsed: parseSpotLabel(label), count: 0, value: 0 }));
+
+    // Walk each R/M card and assign it to the FIRST matching candidate.
+    // This matches how the live spot list works in priority order (the candidate
+    // array's order is deliberate: Multicolored first for color splits so it
+    // claims multi-color cards before the mono-color spots see them — clean
+    // partition, sum equals parent EV).
+    forEachRMCard(rosterEntries, (card, value) => {
+      for (const c of parsedCands) {
+        if (cardMatchesSpot(card, c.parsed)) {
+          c.count++; c.value += value;
+          break;
+        }
+      }
+    });
+
+    // Drop empty buckets and sort by the candidate ORDER (preserves the
+    // priority-sensitive layout — Multicolored first for color splits, etc.)
+    return parsedCands
+      .filter(c => c.count > 0)
+      .map(c => ({ label: c.label, count: c.count, value: c.value }));
+  }
+
+  // Helper — generates the candidate labels for a split BEFORE filtering by
+  // whether they have any matching cards. Order matters: in color splits the
+  // Multicolored bucket sits first so it claims multi-color cards before the
+  // mono-color buckets see them (assuming the user keeps the order).
+  function candidateSplitLabels(parentLabel, dimension) {
+    const parent = (parentLabel || '').trim();
+    if (!parent) return [];
+    if (dimension === 'color') {
+      return [
+        `Multicolored ${parent}`,
+        `White ${parent}`,
+        `Blue ${parent}`,
+        `Black ${parent}`,
+        `Red ${parent}`,
+        `Green ${parent}`,
+        `Colorless ${parent}`,
+      ];
+    }
+    if (dimension === 'supertype') {
+      // Legendary first (higher value usually), then non-legendary.
+      // Snow is rare; we include it only conditionally — the empty-bucket filter
+      // in splitLabelsBy will drop it if there are no snow cards.
+      return [
+        `Legendary ${parent}`,
+        `Snow ${parent}`,
+        `${parent} !Legendary !Snow`,
+      ];
+    }
+    if (dimension === 'subtype') {
+      // Only meaningful for Enchantment / Artifact (with optional !Creature).
+      // The "rest" bucket inherits the parent's exclusions and adds the specific
+      // subtypes to its excludes list.
+      const lower = parent.toLowerCase();
+      if (/\benchantment\b/.test(lower)) {
+        // Generate the "rest" by appending exclusions to the parent label
+        return [
+          'Saga',
+          'Aura',
+          'Class',
+          'Case',
+          `${parent} !Saga !Aura !Class !Case`,
+        ];
+      }
+      if (/\bartifact\b/.test(lower)) {
+        return [
+          'Equipment',
+          'Vehicle',
+          `${parent} !Equipment !Vehicle`,
+        ];
+      }
+      return [];
+    }
+    return [];
+  }
+
+  /**
+   * Try to find a simpler single-clause label that claims the SAME set of R/M
+   * cards as a given (potentially multi-clause) label. Used after a merge so
+   * "(A - B) / B" collapses to "A" when B ⊆ A.
+   *
+   * Compares matched counts to determine set equality (same count + matching
+   * cards-per-card-id is sufficient — we use a content hash via a sorted name list).
+   *
+   * Returns the simpler label string, or null if no simpler equivalent exists.
+   */
+  function trySimplifyMergedLabel(originalLabel, rosterEntries) {
+    if (!originalLabel || !originalLabel.includes('/')) return null;
+    const originalParsed = parseSpotLabel(originalLabel);
+    if (originalParsed.length < 2) return null;
+
+    // Build a content-based signature of which cards match. Use card name + setCode + collector_number
+    // as a stable id (cards in the demo preload may not have a card.id field).
+    function cardKey(card) {
+      return `${(card.set || '').toLowerCase()}_${card.collector_number || ''}_${card.name || ''}`;
+    }
+    function signature(parsed) {
+      const matched = new Set();
+      forEachRMCard(rosterEntries, (card) => {
+        if (cardMatchesSpot(card, parsed)) matched.add(cardKey(card));
+      });
+      return [...matched].sort().join('|');
+    }
+
+    const targetSig = signature(originalParsed);
+    if (!targetSig) return null;
+
+    // Generate candidate labels. Order by SIMPLICITY (fewest exclusions first).
+    const baseTypes = ['Artifact', 'Enchantment', 'Land', 'Instant', 'Sorcery', 'Battle', 'Planeswalker'];
+    const exclusionPool = {
+      Artifact:     ['Creature', 'Legendary', 'Equipment', 'Vehicle'],
+      Enchantment:  ['Creature', 'Legendary', 'Aura', 'Saga', 'Class', 'Case'],
+      Land:         ['Creature', 'Legendary'],
+      Instant:      ['Creature'],
+      Sorcery:      ['Creature'],
+      Battle:       ['Creature'],
+      Planeswalker: ['Creature'],
+    };
+
+    for (const base of baseTypes) {
+      const exes = exclusionPool[base] || [];
+      // Try all 2^n subsets, sorted by number of exclusions (fewest first)
+      const subsets = [];
+      for (let mask = 0; mask < (1 << exes.length); mask++) {
+        const subset = exes.filter((_, i) => mask & (1 << i));
+        subsets.push(subset);
+      }
+      subsets.sort((a, b) => a.length - b.length);
+
+      for (const subset of subsets) {
+        const candLabel = subset.length === 0
+          ? base
+          : `${base} (excluding ${subset.join(', ')})`;
+        // Skip if the candidate label is literally the same as the original
+        if (candLabel === originalLabel) continue;
+        const candParsed = parseSpotLabel(candLabel);
+        if (!candParsed.length) continue;
+        const candSig = signature(candParsed);
+        if (candSig === targetSig) return candLabel;
+      }
+    }
+
+    // Also try the "Legendary X" family for each base
+    for (const base of baseTypes) {
+      const candLabel = `Legendary ${base}`;
+      const candParsed = parseSpotLabel(candLabel);
+      if (!candParsed.length) continue;
+      const candSig = signature(candParsed);
+      if (candSig === targetSig) return candLabel;
+    }
+
+    return null;
+  }
+
+  /**
+   * Detect whether a given spot label can be split by a given dimension.
+   * Returns true even if some sub-buckets would be empty (UI filters those out
+   * via splitLabelsBy). Mostly used to decide which menu items to enable.
+   */
+  function canSplitBy(label, dimension) {
+    const parent = (label || '').trim().toLowerCase();
+    if (!parent) return false;
+    if (dimension === 'color') {
+      // Don't offer color split if the label already contains a color term
+      const colorTerms = ['white', 'blue', 'black', 'red', 'green', 'colorless', 'multicolor', 'multicolored'];
+      return !colorTerms.some(t => new RegExp(`\\b${t}\\b`).test(parent));
+    }
+    if (dimension === 'supertype') {
+      // Don't offer if already split by Legendary/Snow
+      if (/\blegendary\b/.test(parent) || /\bsnow\b/.test(parent)) return false;
+      return true;
+    }
+    if (dimension === 'subtype') {
+      return /\benchantment\b/.test(parent) || /\bartifact\b/.test(parent);
+    }
+    return false;
+  }
+
   /**
    * Identify R/M cards in the roster that DON'T match any of the current spots,
    * grouped by category (primary creature subtype OR non-creature subtype OR
@@ -2852,14 +3279,28 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     function classify(card) {
       const typeLine = (card.type_line || '').toLowerCase();
       const isCreatureCard = typeLine.includes('creature');
+      const isLegendary = /\blegendary\b/.test(typeLine);
       if (isCreatureCard) {
+        // Creatures: just the primary subtype (Legendary creatures still bucket
+        // by tribe in a typical Kindred break — Liliana the Last Hope is in Human
+        // tribe, not a separate "Legendary Human").
         const sub = primaryCreatureSubtype(card);
-        if (sub) return sub.charAt(0).toUpperCase() + sub.slice(1);
+        if (sub && !NON_TRIBE_TOKENS.has(sub)) return sub.charAt(0).toUpperCase() + sub.slice(1);
       }
       const subs = cardSubtypes(card);
-      if (subs.length) return subs[0].charAt(0).toUpperCase() + subs[0].slice(1);
+      if (subs.length) {
+        // Skip junk tokens (//, —, supertypes, etc.) so we don't suggest those.
+        const goodSub = subs.find(s => s && !NON_TRIBE_TOKENS.has(s));
+        if (goodSub) return goodSub.charAt(0).toUpperCase() + goodSub.slice(1);
+      }
+      // No subtype found — fall through to card-type bucket. Add Legendary prefix
+      // when applicable so the streamer can see WHICH variant is missing (e.g.,
+      // "Legendary Enchantment" vs the generic "Enchantment" that's already in
+      // the spot list).
       for (const ct of ['Sorcery', 'Instant', 'Planeswalker', 'Battle', 'Artifact', 'Enchantment', 'Land']) {
-        if (typeLine.includes(ct.toLowerCase())) return ct;
+        if (typeLine.includes(ct.toLowerCase())) {
+          return isLegendary ? `Legendary ${ct}` : ct;
+        }
       }
       return null;
     }
@@ -2928,6 +3369,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     starTiers: { three: 10, two: 20, one: 30, notable: 20 },
     starLabels: { three: '⭐⭐⭐', two: '⭐⭐', one: '⭐' },
     hitSpots: new Set(),     // Set of spot IDs marked as already pulled
+    selectedSpotIds: new Set(), // Set of spot IDs currently checked for Merge Selected
+    rosterLocked: false,     // Toggled by Lock Roster button. While locked, roster controls are disabled.
     lastDistribution: null,  // cached analyzeSpotDistribution result
     productType: 'booster',  // 'booster' | 'secret_lair' | 'commander_precon'
     selectedSet: null,
@@ -2989,6 +3432,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     massEntry: $('mass-entry'),
     parseMassBtn: $('parse-mass-btn'),
     autoTabulateBtn: $('auto-tabulate-btn'),
+    lockRosterBtn:     $('lock-roster-btn'),
+    lockRosterStatus:  $('lock-roster-status'),
+    mergeSpotsBtn:     $('merge-spots-btn'),
+    sortSpotsEvBtn:    $('sort-spots-ev-btn'),
+    sortSpotsAlphaBtn: $('sort-spots-alpha-btn'),
+    sortSpotsTypeBtn:  $('sort-spots-type-btn'),
     spotsList: $('spots-list'),
     spotsCount: $('spots-count'),
     clearSpotsBtn: $('clear-spots-btn'),
@@ -3090,6 +3539,11 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     dom.calcEvBtn.disabled = !ready;
     dom.simulateBtn.disabled = !ready;
     if (dom.autoTabulateBtn) dom.autoTabulateBtn.disabled = !ready;
+    if (dom.lockRosterBtn) dom.lockRosterBtn.disabled = !ready;
+    const canSort = ready && state.spots.length >= 2;
+    if (dom.sortSpotsEvBtn)    dom.sortSpotsEvBtn.disabled    = !canSort;
+    if (dom.sortSpotsAlphaBtn) dom.sortSpotsAlphaBtn.disabled = !canSort;
+    if (dom.sortSpotsTypeBtn)  dom.sortSpotsTypeBtn.disabled  = !canSort;
     // Refresh suggestion panel whenever roster readiness changes
     if (typeof renderMissingSpots === 'function') renderMissingSpots();
   }
@@ -3937,6 +4391,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // Reset spot IDs so #1 starts at 1 again (cosmetic — keeps the spot numbers tidy).
     state.nextSpotId = 1;
     state.hitSpots.clear();
+    state.selectedSpotIds.clear();
     let added = 0;
     for (const r of ranked) {
       const parsed = parseSpotLabel(r.name);
@@ -3952,27 +4407,352 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     showToast(`Auto-added ${added} spots ranked by value × frequency${replacedNote}`, 'success');
   }
 
+  /**
+   * Lock Roster — toggle action. When transitioning OFF→ON, seeds the spot list
+   * from the roster (replacing any existing spots, with a confirm). While locked,
+   * roster controls are disabled so the streamer doesn't accidentally edit and
+   * invalidate their work. Unlock to re-enable roster editing; spots are kept.
+   */
+  function toggleRosterLock() {
+    if (!rosterIsReady()) { showToast('Wait for roster to finish loading', 'error'); return; }
+    if (state.rosterLocked) {
+      // Unlock — just flip the flag, keep spots intact
+      state.rosterLocked = false;
+      applyRosterLockUI();
+      showToast('Roster unlocked. Add or remove products; re-lock when ready to refresh spots.', 'info');
+      return;
+    }
+    // Lock — seed the spots
+    const ranked = seedCategoryLabels(state.roster);
+    if (!ranked.length) { showToast('No R/M cards found in roster', 'error'); return; }
+    const previousCount = state.spots.length;
+    if (previousCount > 0) {
+      const ok = confirm(`Lock Roster & Seed Spots will REPLACE your current ${previousCount} spot${previousCount === 1 ? '' : 's'} with ${ranked.length} fresh categories ranked by EV.\n\nContinue?`);
+      if (!ok) return;
+    }
+    state.spots = [];
+    state.nextSpotId = 1;
+    state.hitSpots.clear();
+    state.selectedSpotIds.clear();
+    for (const r of ranked) {
+      const parsed = parseSpotLabel(r.label);
+      if (parsed.length) state.spots.push({ id: state.nextSpotId++, label: r.label, parsed });
+    }
+    // Sort by ACTUAL displayed EV (priority-aware) so any tribe whose cards get
+    // stolen by a higher-priority spot sinks to the bottom of the list.
+    sortSpotsByDisplayedEV();
+    state.rosterLocked = true;
+    applyRosterLockUI();
+    renderSpots();
+    updateButtonStates();
+    refreshAnalysisIfReady();
+    showToast(`Locked roster — ${state.spots.length} spots seeded by EV. Split or merge to dial in your target.`, 'success');
+  }
+
+  /**
+   * Re-sort state.spots by their ACTUAL (priority-aware) displayed EV. Mutates
+   * state.spots in place. Used after lock to ensure the visible order matches
+   * what's shown in the EV column.
+   */
+  function sortSpotsByDisplayedEV() {
+    if (!rosterIsReady() || state.spots.length === 0) return;
+    // Iterate to a stable order: compute, sort, recompute, sort, until no change
+    // (or max 5 iterations as a safety cap). Each iteration may shift positions
+    // because the EV of a spot depends on which spots are higher-priority.
+    for (let iter = 0; iter < 5; iter++) {
+      const dist = analyzeSpotDistribution(state.roster, state.spots);
+      const ev = dist.spotEV;
+      const indexed = state.spots.map((s, i) => ({ spot: s, ev: ev[i] || 0 }));
+      const sortKey = indexed.map(x => x.ev).join('|');
+      indexed.sort((a, b) => b.ev - a.ev);
+      state.spots = indexed.map(x => x.spot);
+      const newDist = analyzeSpotDistribution(state.roster, state.spots);
+      const newKey = newDist.spotEV.join('|');
+      if (sortKey === newKey) break;
+    }
+  }
+
+  function applyRosterLockUI() {
+    if (dom.lockRosterBtn) {
+      if (state.rosterLocked) {
+        dom.lockRosterBtn.innerHTML = '\u{1F513} Unlock Roster';
+        dom.lockRosterBtn.classList.remove('btn-primary');
+        dom.lockRosterBtn.classList.add('btn-accent');
+      } else {
+        dom.lockRosterBtn.innerHTML = '\u{1F512} Lock Roster &amp; Seed Spots';
+        dom.lockRosterBtn.classList.add('btn-primary');
+        dom.lockRosterBtn.classList.remove('btn-accent');
+      }
+    }
+    if (dom.lockRosterStatus) {
+      dom.lockRosterStatus.textContent = state.rosterLocked
+        ? 'Roster locked. Define Your Spots is now populated. Unlock to add more products.'
+        : 'Add products above, then lock the roster to auto-populate your spots.';
+    }
+    // Disable roster controls while locked. Apply a `.roster-locked` class on the
+    // roster section's body for CSS to grey out everything inside it.
+    const rosterBody = document.querySelector('#roster-section .card-body');
+    if (rosterBody) rosterBody.classList.toggle('roster-locked', state.rosterLocked);
+  }
+
+  /**
+   * Seed Categories — populate the spot list with the user-friendly initial
+   * categorization (Artifact/Enchantment non-creature, Land, PW, Battle, Instant,
+   * Sorcery, then every creature tribe present, all sorted by EV desc).
+   * Replaces the current spot list with a confirm — same pattern as Auto-Tabulate.
+   */
+  function seedCategoriesAction() {
+    if (!rosterIsReady()) { showToast('Wait for roster to finish loading', 'error'); return; }
+    const ranked = seedCategoryLabels(state.roster);
+    if (!ranked.length) { showToast('No R/M cards found in roster', 'error'); return; }
+    const previousCount = state.spots.length;
+    if (previousCount > 0) {
+      const ok = confirm(`Lock Roster & Seed Spots will REPLACE your current ${previousCount} spot${previousCount === 1 ? '' : 's'} with ${ranked.length} fresh categories ranked by EV.\n\nContinue?`);
+      if (!ok) return;
+    }
+    state.spots = [];
+    state.nextSpotId = 1;
+    state.hitSpots.clear();
+    state.selectedSpotIds.clear();
+    for (const r of ranked) {
+      const parsed = parseSpotLabel(r.label);
+      if (parsed.length) state.spots.push({ id: state.nextSpotId++, label: r.label, parsed });
+    }
+    renderSpots();
+    updateButtonStates();
+    refreshAnalysisIfReady();
+    showToast(`Seeded ${state.spots.length} categories — now split/merge until you hit ${state.targetSpotCount}`, 'success');
+  }
+
+  /**
+   * Split a single spot by a dimension (color / supertype / subtype).
+   * Sub-spots replace the original IN PLACE — priority order preserved.
+   * Empty sub-buckets (no matching R/M cards) are dropped automatically.
+   */
+  function splitSpot(spotId, dimension) {
+    const idx = state.spots.findIndex(s => s.id === spotId);
+    if (idx < 0) return;
+    const parent = state.spots[idx];
+    const subs = splitLabelsBy(parent.label, dimension, state.roster);
+    if (!subs.length) {
+      showToast(`No "${dimension}" split produced any non-empty sub-spots for ${parent.label}`, 'warning');
+      return;
+    }
+    // Tag each child with its parent's label so a later merge of ALL siblings
+    // can restore the original parent cleanly (instead of joining with `/`).
+    const newSpots = subs.map(sub => {
+      const parsed = parseSpotLabel(sub.label);
+      return parsed.length ? {
+        id: state.nextSpotId++,
+        label: sub.label,
+        parsed,
+        parentLabel: parent.label
+      } : null;
+    }).filter(Boolean);
+    state.spots.splice(idx, 1, ...newSpots);
+    state.selectedSpotIds.delete(spotId);
+    renderSpots();
+    refreshAnalysisIfReady();
+    showToast(`Split "${parent.label}" into ${newSpots.length} sub-spots`, 'success');
+  }
+
+  /**
+   * Merge multiple selected spots into one using the parser's `/` OR syntax.
+   * The merged spot lands at the position of the FIRST selected (in pool order),
+   * so priority is preserved.
+   */
+  function mergeSelectedSpots() {
+    const selectedSpots = state.spots.filter(s => state.selectedSpotIds.has(s.id));
+    if (selectedSpots.length < 2) {
+      showToast('Select at least 2 spots to merge', 'warning');
+      return;
+    }
+    const firstIdx = state.spots.findIndex(s => state.selectedSpotIds.has(s.id));
+
+    // Smart restoration: if every selected spot shares the SAME parentLabel AND
+    // those are the only spots in the list with that parentLabel (i.e. the user
+    // is un-doing the whole split), restore the parent label instead of joining
+    // with `/`. This makes "Split Phoenix by Color → Multicolored Phoenix +
+    // Red Phoenix" → "merge them back → Phoenix" round-trip cleanly.
+    const parentLabels = new Set(selectedSpots.map(s => s.parentLabel || ''));
+    if (parentLabels.size === 1) {
+      const parentLabel = [...parentLabels][0];
+      const siblingsInList = state.spots.filter(s => (s.parentLabel || '') === parentLabel).length;
+      if (parentLabel && siblingsInList === selectedSpots.length) {
+        const parsed = parseSpotLabel(parentLabel);
+        if (parsed.length) {
+          state.spots = state.spots.filter(s => !state.selectedSpotIds.has(s.id));
+          // Preserve the original parent's lineage (if it had one — multi-level split)
+          const restored = { id: state.nextSpotId++, label: parentLabel, parsed };
+          state.spots.splice(firstIdx, 0, restored);
+          state.selectedSpotIds.clear();
+          renderSpots();
+          refreshAnalysisIfReady();
+          showToast(`Restored "${parentLabel}" from ${selectedSpots.length} split children`, 'success');
+          return;
+        }
+      }
+    }
+
+    // Fallback: combine the labels with `/` OR syntax.
+    const verboseLabel = selectedSpots.map(s => s.label).join('/');
+    // Try to find a simpler single-clause equivalent: (A - B) + B → A, etc.
+    // If trySimplifyMergedLabel returns a hit, use it instead of the verbose join.
+    let mergedLabel = verboseLabel;
+    let simplified = false;
+    try {
+      const simpler = trySimplifyMergedLabel(verboseLabel, state.roster);
+      if (simpler) { mergedLabel = simpler; simplified = true; }
+    } catch (e) { console.warn('[merge] simplification failed:', e.message); }
+    const parsed = parseSpotLabel(mergedLabel);
+    if (!parsed.length) {
+      showToast('Merge produced an unparseable label', 'error');
+      return;
+    }
+    state.spots = state.spots.filter(s => !state.selectedSpotIds.has(s.id));
+    state.spots.splice(firstIdx, 0, { id: state.nextSpotId++, label: mergedLabel, parsed });
+    state.selectedSpotIds.clear();
+    renderSpots();
+    refreshAnalysisIfReady();
+    const note = simplified ? ` (simplified from ${selectedSpots.length} spots)` : '';
+    showToast(`Merged into "${mergedLabel}"${note}`, 'success');
+  }
+
+  /**
+   * Reverse of merge — split a `/`-containing label back into its components,
+   * IN PLACE so priority is preserved.
+   */
+  function unmergeSpot(spotId) {
+    const idx = state.spots.findIndex(s => s.id === spotId);
+    if (idx < 0) return;
+    const parent = state.spots[idx];
+    if (!parent.label.includes('/')) return;
+    const parts = parent.label.split('/').map(p => p.trim()).filter(Boolean);
+    const newSpots = parts.map(part => {
+      const parsed = parseSpotLabel(part);
+      return parsed.length ? { id: state.nextSpotId++, label: part, parsed } : null;
+    }).filter(Boolean);
+    if (!newSpots.length) return;
+    state.spots.splice(idx, 1, ...newSpots);
+    state.selectedSpotIds.delete(spotId);
+    renderSpots();
+    refreshAnalysisIfReady();
+    showToast(`Unmerged "${parent.label}" into ${newSpots.length} spots`, 'success');
+  }
+
+  // Sort the spot list by EV descending (also changes priority order).
+  function sortSpotsByEV() {
+    if (state.spots.length < 2) return;
+    sortSpotsByDisplayedEV();
+    renderSpots();
+    refreshAnalysisIfReady();
+    showToast('Sorted spots by EV (descending)', 'info');
+  }
+
+  // Sort spots alphabetically by label (A–Z).
+  function sortSpotsAlphabetical() {
+    if (state.spots.length < 2) return;
+    state.spots.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+    renderSpots();
+    refreshAnalysisIfReady();
+    showToast('Sorted spots alphabetically', 'info');
+  }
+
+  // Classify a spot's label into a card-type bucket for "Sort by Type". Returns
+  // a numeric bucket order so we can sort by it.
+  function spotTypeBucket(label) {
+    const lower = label.toLowerCase();
+    // Lands first (Magic order roughly: lands → creatures → artifacts → enchantments → planeswalkers → battles → instants → sorceries)
+    if (/\bland\b/.test(lower))         return { rank: 1, name: 'Land' };
+    if (/\bplaneswalker\b/.test(lower)) return { rank: 2, name: 'Planeswalker' };
+    if (/\bbattle\b/.test(lower))       return { rank: 3, name: 'Battle' };
+    if (/\benchantment\b/.test(lower))  return { rank: 4, name: 'Enchantment' };
+    // Enchantment subtypes — group with Enchantment
+    if (/\b(aura|saga|class|case)\b/.test(lower)) return { rank: 4, name: 'Enchantment' };
+    if (/\bartifact\b/.test(lower))     return { rank: 5, name: 'Artifact' };
+    // Artifact subtypes — group with Artifact
+    if (/\b(equipment|vehicle)\b/.test(lower))    return { rank: 5, name: 'Artifact' };
+    if (/\binstant\b/.test(lower))      return { rank: 6, name: 'Instant' };
+    if (/\bsorcery\b/.test(lower))      return { rank: 7, name: 'Sorcery' };
+    // Anything else (creature tribes, weird custom labels) goes to the Creature bucket
+    return { rank: 8, name: 'Creature' };
+  }
+
+  // Sort spots by card-type bucket, then alphabetically within each bucket.
+  function sortSpotsByType() {
+    if (state.spots.length < 2) return;
+    state.spots.sort((a, b) => {
+      const bA = spotTypeBucket(a.label);
+      const bB = spotTypeBucket(b.label);
+      if (bA.rank !== bB.rank) return bA.rank - bB.rank;
+      return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+    });
+    renderSpots();
+    refreshAnalysisIfReady();
+    showToast('Sorted spots by type (then alphabetical)', 'info');
+  }
+
   function renderSpots() {
     if (!dom.spotsList) return;
     dom.spotsList.innerHTML = '';
+    // Compute fresh EVs every render so the column never shows stale data.
+    // Skip if the roster isn't ready yet (EVs would all be $0 anyway).
+    let evArr = [];
+    if (rosterIsReady() && state.spots.length > 0) {
+      try {
+        const dist = analyzeSpotDistribution(state.roster, state.spots);
+        evArr = dist.spotEV || [];
+        // Cache so other surfaces (buyer panel, sort-by-EV button) see fresh data
+        state.lastDistribution = dist;
+      } catch (e) {
+        console.warn('[renderSpots] analyzeSpotDistribution failed:', e.message);
+      }
+    }
     for (let i = 0; i < state.spots.length; i++) {
       const spot = state.spots[i];
       const div = document.createElement('div');
       div.className = 'spot-item';
       div.draggable = true;
       div.dataset.id = String(spot.id);
+      const isMerged = spot.label.includes('/');
+      const isSelected = state.selectedSpotIds.has(spot.id);
+      const canColor = canSplitBy(spot.label, 'color');
+      const canSuper = canSplitBy(spot.label, 'supertype');
+      const canSub   = canSplitBy(spot.label, 'subtype');
+      const evVal = evArr[i] || 0;
       div.innerHTML = `
+        <input type="checkbox" class="spot-check" title="Select to merge with others" ${isSelected ? 'checked' : ''}>
         <span class="drag-handle" title="Drag to reorder">≡</span>
         <span class="spot-number">#${i + 1}</span>
-        <span class="spot-label">${escHtml(spot.label)}</span>
-        <span class="spot-ev" data-spot-id="${spot.id}">—</span>
+        <span class="spot-label${isMerged ? ' merged' : ''}">${escHtml(spot.label)}</span>
+        <span class="spot-ev" data-spot-id="${spot.id}">${formatPrice(evVal)}</span>
         <div class="spot-actions">
+          <select class="btn btn-sm split-menu" title="Split this spot">
+            <option value="">Split…</option>
+            <option value="color"${canColor ? '' : ' disabled'}>By Color</option>
+            <option value="supertype"${canSuper ? '' : ' disabled'}>By Supertype</option>
+            <option value="subtype"${canSub ? '' : ' disabled'}>By Subtype</option>
+          </select>
+          ${isMerged ? `<button class="btn btn-sm unmerge-spot" title="Split this back into its component spots">Unmerge</button>` : ''}
           <button class="btn btn-sm move-up" title="Move up">▲</button>
           <button class="btn btn-sm move-down" title="Move down">▼</button>
           <button class="btn btn-sm edit-spot" title="Edit label">✎</button>
           <button class="btn btn-sm btn-danger remove-spot" title="Remove">✕</button>
         </div>
       `;
+      div.querySelector('.spot-check').addEventListener('change', e => {
+        if (e.target.checked) state.selectedSpotIds.add(spot.id);
+        else state.selectedSpotIds.delete(spot.id);
+        updateMergeButtonState();
+      });
+      const splitMenu = div.querySelector('.split-menu');
+      splitMenu.addEventListener('change', e => {
+        const dim = e.target.value;
+        e.target.value = '';
+        if (dim) splitSpot(spot.id, dim);
+      });
+      const unmergeBtn = div.querySelector('.unmerge-spot');
+      if (unmergeBtn) unmergeBtn.addEventListener('click', () => unmergeSpot(spot.id));
       div.querySelector('.move-up').addEventListener('click', () => moveSpot(spot.id, -1));
       div.querySelector('.move-down').addEventListener('click', () => moveSpot(spot.id, 1));
       div.querySelector('.remove-spot').addEventListener('click', () => removeSpot(spot.id));
@@ -4017,8 +4797,34 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       });
       dom.spotsList.appendChild(div);
     }
-    if (dom.spotsCount) dom.spotsCount.textContent = `${state.spots.length} spot${state.spots.length === 1 ? '' : 's'} defined`;
+    if (dom.spotsCount) {
+      const n = state.spots.length;
+      dom.spotsCount.textContent = `${n} spot${n === 1 ? '' : 's'} defined`;
+      dom.spotsCount.classList.remove('on-target', 'near-target', 'off-target');
+    }
     if (dom.clearSpotsBtn) dom.clearSpotsBtn.classList.toggle('hidden', state.spots.length === 0);
+    updateMergeButtonState();
+  }
+
+  // The toolbar Merge button doubles as an Unmerge button when exactly one
+  // merged spot is selected — that's a clearer affordance than asking the user
+  // to find the row's Unmerge button.
+  function updateMergeButtonState() {
+    if (!dom.mergeSpotsBtn) return;
+    const n = state.selectedSpotIds.size;
+    if (n === 1) {
+      const onlyId = [...state.selectedSpotIds][0];
+      const spot = state.spots.find(s => s.id === onlyId);
+      if (spot && spot.label.includes('/')) {
+        dom.mergeSpotsBtn.disabled = false;
+        dom.mergeSpotsBtn.textContent = 'Unmerge';
+        dom.mergeSpotsBtn.dataset.mode = 'unmerge';
+        return;
+      }
+    }
+    dom.mergeSpotsBtn.disabled = n < 2;
+    dom.mergeSpotsBtn.textContent = n >= 2 ? `Merge Selected (${n})` : 'Merge Selected';
+    dom.mergeSpotsBtn.dataset.mode = 'merge';
   }
 
   /**
@@ -4062,10 +4868,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
 
   function refreshAnalysisIfReady() {
-    if (state.lastDistribution && rosterIsReady() && state.spots.length > 0) {
+    // Compute the distribution whenever the roster is loaded and spots exist —
+    // don't gate on a prior analysis run. The spot-builder flow needs live EVs
+    // the moment Seed Categories populates the list.
+    if (rosterIsReady() && state.spots.length > 0) {
       const dist = analyzeSpotDistribution(state.roster, state.spots);
       state.lastDistribution = dist;
       if (state.viewMode === 'buyer') renderTrackerTable(dist);
+    } else {
+      state.lastDistribution = null;
     }
     if (state.viewMode === 'builder') refreshBuilderView();
     renderMissingSpots();
@@ -4082,6 +4893,20 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
   if (dom.parseMassBtn) dom.parseMassBtn.addEventListener('click', parseMassEntry);
   if (dom.autoTabulateBtn) dom.autoTabulateBtn.addEventListener('click', runAutoTabulate);
+  if (dom.lockRosterBtn) dom.lockRosterBtn.addEventListener('click', toggleRosterLock);
+  if (dom.mergeSpotsBtn) dom.mergeSpotsBtn.addEventListener('click', () => {
+    // The button switches between merge and unmerge depending on selection state
+    // — see updateMergeButtonState. Dispatch on data-mode.
+    if (dom.mergeSpotsBtn.dataset.mode === 'unmerge') {
+      const onlyId = [...state.selectedSpotIds][0];
+      if (onlyId != null) unmergeSpot(onlyId);
+    } else {
+      mergeSelectedSpots();
+    }
+  });
+  if (dom.sortSpotsEvBtn)    dom.sortSpotsEvBtn.addEventListener('click', sortSpotsByEV);
+  if (dom.sortSpotsAlphaBtn) dom.sortSpotsAlphaBtn.addEventListener('click', sortSpotsAlphabetical);
+  if (dom.sortSpotsTypeBtn)  dom.sortSpotsTypeBtn.addEventListener('click', sortSpotsByType);
   if (dom.clearSpotsBtn) dom.clearSpotsBtn.addEventListener('click', clearAllSpots);
 
   // ─── Track Break & Spot Analysis ───
@@ -5024,8 +5849,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       'Legendary Artifact',
       'Legendary Enchantment',
       // Exclusion examples
-      'Artifact excluding legendary and equipment',
-      'Enchantment excluding creature and legendary',
+      'Artifact excluding legendary and equipment and vehicle',
+      'Enchantment excluding creature and legendary and class and case and saga',
       // Card-type fallback spots
       'Planeswalker',
       'Battle',
@@ -5104,14 +5929,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       failures.push(`SLD master set: ${e.message || 'fetch failed'}`);
     }
 
-    // 4. Demo spots — populate state.spots with the kindred spot definition list
+    // Demo spots are NOT auto-loaded anymore — the Lock Roster button is the
+    // single trigger for spot seeding. Clear any stale spots from a prior demo
+    // load so the user starts with a clean slate.
     state.spots = [];
     state.hitSpots.clear();
-    for (const label of (DEMO_BREAK.spots || [])) {
-      const parsed = parseSpotLabel(label);
-      if (parsed.length) state.spots.push({ id: state.nextSpotId++, label, parsed });
-    }
+    state.selectedSpotIds.clear();
+    state.rosterLocked = false;
     renderSpots();
+    applyRosterLockUI();
 
     hideLoading();
     updateButtonStates();
@@ -5228,14 +6054,14 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       renderRoster();
     }
 
-    // 4. Define demo spots
-    dom.loadingText.textContent = 'Setting up kindred spots…';
-    await sleep(STEP_DELAY);
-    for (const label of (DEMO_BREAK.spots || [])) {
-      const parsed = parseSpotLabel(label);
-      if (parsed.length) state.spots.push({ id: state.nextSpotId++, label, parsed });
-    }
+    // No demo spot pre-loading — Lock Roster is the single seed trigger now.
+    // Reset any stale state from prior demo loads.
+    state.spots = [];
+    state.hitSpots.clear();
+    state.selectedSpotIds.clear();
+    state.rosterLocked = false;
     renderSpots();
+    applyRosterLockUI();
     updateRosterSummary();
     updateButtonStates();
 
@@ -5473,15 +6299,16 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       placement: 'top'
     },
     {
-      target: '#spots-section',
-      title: 'Define your spots — the heart of a Kindred Break',
-      body: 'Spots are the tribes and types you\'re selling. Priority order matters: the top spot wins when a card matches multiple. The demo populated a ~40-spot mix that uses every supported syntax: single tribes (<code>Dragon</code>), combined (<code>Snake/Snail</code>, <code>Class/Case</code>), color+tribe AND (<code>White Human</code>, <code>Blue Human</code>...), multi-condition (<code>Legendary Enchantment</code>), and exclusions (<code>Enchantment excluding creature and legendary</code>). Drag rows to reorder, click ✎ to edit a label inline, ✕ to remove.',
-      placement: 'top'
+      target: '#lock-roster-btn',
+      title: 'Lock Roster & Seed Spots',
+      body: 'Done building your roster? Click <strong>Lock Roster &amp; Seed Spots</strong>. This computes the EV math, populates Define Your Spots with the standard Kindred categories (Land, Legendary Land, Enchantment subtypes, Artifact subtypes, Instant, Sorcery, Battle, PW) plus every creature tribe present, all sorted by EV. While locked, the roster controls grey out so you don\'t accidentally invalidate your spot work. Click again to unlock if you need to add more products.',
+      placement: 'top',
+      primaryAction: { label: 'Lock Roster Now ⏵', fn: 'lockRosterAndAdvance' }
     },
     {
-      target: '#auto-tabulate-btn',
-      title: 'Auto-Tabulate',
-      body: 'Don\'t want to type 40 spots? After your roster loads, hit Auto-Tabulate. It scans the R/M cards in your roster and proposes spots ranked by total value × frequency. You can refine the list manually after.',
+      target: '#spots-section',
+      title: 'Define your spots — the heart of a Kindred Break',
+      body: 'Each spot is a tribe or type you\'re selling. Priority order matters: the top spot wins when a card matches multiple. After locking the roster, you\'ll have ~80 spots seeded by EV. The streamer\'s job from here is <strong>split</strong> the big buckets (click <em>Split…</em> → Color / Supertype / Subtype on a row) and <strong>merge</strong> the small ones (check 2+ rows, click Merge Selected — and if you select just one merged spot, the button becomes Unmerge). Drag rows to reorder, ✎ to edit a label inline, ✕ to remove. Sort by EV / A–Z / by Type whenever you want a refresh.',
       placement: 'top'
     },
     {
@@ -5570,6 +6397,14 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         if (dom.analyzeBtn && !dom.analyzeBtn.disabled) dom.analyzeBtn.click();
         // Give it a beat to render, then advance
         setTimeout(() => { tourState.stepIndex++; renderTourStep(); }, 200);
+      },
+      lockRosterAndAdvance: () => {
+        // Trigger Lock Roster (no-op if roster isn't ready or already locked)
+        if (dom.lockRosterBtn && !dom.lockRosterBtn.disabled && !state.rosterLocked) {
+          toggleRosterLock();
+        }
+        // Brief delay so the spot list renders before the next step highlights it
+        setTimeout(() => { tourState.stepIndex++; renderTourStep(); }, 250);
       }
     };
     return actions[name];
