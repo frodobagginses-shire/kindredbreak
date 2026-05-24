@@ -3176,23 +3176,34 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     const originalParsed = parseSpotLabel(originalLabel);
     if (originalParsed.length < 2) return null;
 
-    // Build a content-based signature of which cards match. Use card name + setCode + collector_number
-    // as a stable id (cards in the demo preload may not have a card.id field).
     function cardKey(card) {
       return `${(card.set || '').toLowerCase()}_${card.collector_number || ''}_${card.name || ''}`;
     }
-    function signature(parsed) {
+    function cardSet(parsed) {
       const matched = new Set();
       forEachRMCard(rosterEntries, (card) => {
         if (cardMatchesSpot(card, parsed)) matched.add(cardKey(card));
       });
-      return [...matched].sort().join('|');
+      return matched;
     }
 
-    const targetSig = signature(originalParsed);
-    if (!targetSig) return null;
+    // Match if the candidate's card set is within tolerance of the merged set.
+    // Tolerance: ≤ 1% symmetric difference AND ≤ 5 cards. This catches the
+    // Bestow Aura / Saga Creature edge cases where the user's merge produces a
+    // set that's 99%+ identical to "Enchantment (excluding Creature)" but has
+    // a few stragglers from creature-typed enchantment-subtypes.
+    function approxEqual(a, b) {
+      if (a.size === 0 && b.size === 0) return true;
+      let diff = 0;
+      for (const x of a) if (!b.has(x)) diff++;
+      for (const x of b) if (!a.has(x)) diff++;
+      const total = a.size + b.size;
+      return diff <= 5 && (total === 0 || diff / total <= 0.01);
+    }
 
-    // Generate candidate labels. Order by SIMPLICITY (fewest exclusions first).
+    const targetSet = cardSet(originalParsed);
+    if (targetSet.size === 0) return null;
+
     const baseTypes = ['Artifact', 'Enchantment', 'Land', 'Instant', 'Sorcery', 'Battle', 'Planeswalker'];
     const exclusionPool = {
       Artifact:     ['Creature', 'Legendary', 'Equipment', 'Vehicle'],
@@ -3206,7 +3217,6 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
     for (const base of baseTypes) {
       const exes = exclusionPool[base] || [];
-      // Try all 2^n subsets, sorted by number of exclusions (fewest first)
       const subsets = [];
       for (let mask = 0; mask < (1 << exes.length); mask++) {
         const subset = exes.filter((_, i) => mask & (1 << i));
@@ -3218,22 +3228,21 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         const candLabel = subset.length === 0
           ? base
           : `${base} (excluding ${subset.join(', ')})`;
-        // Skip if the candidate label is literally the same as the original
         if (candLabel === originalLabel) continue;
         const candParsed = parseSpotLabel(candLabel);
         if (!candParsed.length) continue;
-        const candSig = signature(candParsed);
-        if (candSig === targetSig) return candLabel;
+        const candSet = cardSet(candParsed);
+        if (approxEqual(candSet, targetSet)) return candLabel;
       }
     }
 
-    // Also try the "Legendary X" family for each base
+    // Also try Legendary X family
     for (const base of baseTypes) {
       const candLabel = `Legendary ${base}`;
       const candParsed = parseSpotLabel(candLabel);
       if (!candParsed.length) continue;
-      const candSig = signature(candParsed);
-      if (candSig === targetSig) return candLabel;
+      const candSet = cardSet(candParsed);
+      if (approxEqual(candSet, targetSet)) return candLabel;
     }
 
     return null;
