@@ -2334,14 +2334,27 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return out;
   }
 
+  // Subtypes that LOOK like creature subtypes when they appear after the `—`
+  // but actually aren't real tribes (they're enchantment/artifact subtypes that
+  // happen to share the position). Cards like "Enchantment Creature — Saga
+  // Dragon" have "saga" first but their real tribe is Dragon. Skip these and
+  // pick the next valid token.
+  const NON_TRIBE_PRIMARIES = new Set([
+    'saga', 'aura', 'class', 'case', 'equipment', 'vehicle',
+  ]);
   function primaryCreatureSubtype(card) {
     const tl = card.type_line || '';
     if (!tl.toLowerCase().includes('creature')) return null;
     const dash = tl.indexOf('—');
     if (dash < 0) return null;
     const after = tl.substring(dash + 1).trim();
-    const first = after.split(/\s+/)[0];
-    return first ? first.toLowerCase() : null;
+    const tokens = after.split(/\s+/).map(t => t.toLowerCase()).filter(Boolean);
+    for (const t of tokens) {
+      // Skip junk separators and enchantment/artifact subtypes — find the real tribe.
+      if (NON_TRIBE_TOKENS.has(t) || NON_TRIBE_PRIMARIES.has(t)) continue;
+      return t;
+    }
+    return null;
   }
 
   function isCreature(card) {
@@ -2941,15 +2954,21 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // exclusion is dropped if no card in the pool would actually be excluded
     // by it — so "Sorcery !Creature" collapses to just "Sorcery" when there
     // are no creature-typed Sorceries in the roster.
+    // In a Kindred Break, CREATURES TRUMP EVERYTHING. So every enchantment/
+    // artifact subtype label considers !Creature — a Saga Creature like
+    // Mightstone's Animation goes to its creature tribe, not the Saga spot.
+    // Equipment and Vehicle additionally consider !Planeswalker for cards like
+    // The Aetherspark (Equipment Planeswalker) — those go to the Planeswalker
+    // spot, not Equipment.
     const NC_CANDIDATES = [
       { base: 'Land',          considerEx: ['Creature', 'Legendary'] },
       { base: 'Legendary Land', considerEx: ['Creature'] },
-      { base: 'Aura',           considerEx: [] },
-      { base: 'Saga',           considerEx: [] },
-      { base: 'Class',          considerEx: [] },
-      { base: 'Case',           considerEx: [] },
-      { base: 'Equipment',      considerEx: [] },
-      { base: 'Vehicle',        considerEx: [] },
+      { base: 'Aura',           considerEx: ['Creature'] },
+      { base: 'Saga',           considerEx: ['Creature'] },
+      { base: 'Class',          considerEx: ['Creature'] },
+      { base: 'Case',           considerEx: ['Creature'] },
+      { base: 'Equipment',      considerEx: ['Creature', 'Planeswalker'] },
+      { base: 'Vehicle',        considerEx: ['Creature', 'Planeswalker'] },
       { base: 'Legendary Artifact', considerEx: ['Creature', 'Equipment', 'Vehicle'] },
       { base: 'Artifact',       considerEx: ['Creature', 'Legendary', 'Equipment', 'Vehicle'] },
       { base: 'Legendary Enchantment', considerEx: ['Creature', 'Aura', 'Class', 'Case', 'Saga'] },
@@ -2959,13 +2978,6 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       { base: 'Battle',         considerEx: ['Creature'] },
       { base: 'Planeswalker',   considerEx: ['Creature'] },
     ];
-
-    // Subtypes that are NOT a real creature tribe even when they appear as the
-    // primary creature subtype. Saga Creatures like Mightstone's Animation,
-    // Equipment Creatures, etc. — route to the enchantment/artifact bucket.
-    const NON_TRIBE_CREATURE_SUBS = new Set([
-      'saga', 'aura', 'class', 'case', 'equipment', 'vehicle',
-    ]);
 
     // STEP 1: for each candidate, figure out which considerEx exclusions are
     // ACTUALLY NEEDED. An exclusion is necessary iff at least one card in the
@@ -3040,11 +3052,10 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       const typeLine = (card.type_line || '').toLowerCase();
       const isCreature = typeLine.includes('creature');
       if (isCreature) {
+        // Creatures trump everything — go to the primary creature tribe.
+        // Saga/Aura/Class/Case/Equipment/Vehicle creatures still route here;
+        // their corresponding NC candidates exclude Creature via considerEx.
         const sub = primaryCreatureSubtype(card);
-        if (sub && NON_TRIBE_CREATURE_SUBS.has(sub)) {
-          routeToNcCandidate(card, value);
-          return;
-        }
         if (sub && !NON_TRIBE_TOKENS.has(sub)) {
           const display = sub.charAt(0).toUpperCase() + sub.slice(1);
           if (!tribeStats.has(display)) tribeStats.set(display, { count: 0, value: 0 });
@@ -3079,8 +3090,18 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
    * @returns Array<{ label, count, value }>
    */
   function splitLabelsBy(parentLabel, dimension, rosterEntries) {
-    const candidates = candidateSplitLabels(parentLabel, dimension);
-    if (!candidates.length) return [];
+    const rawCandidates = candidateSplitLabels(parentLabel, dimension);
+    if (!rawCandidates.length) return [];
+
+    // Normalize every candidate to clean English form — kills any `!X !Y`
+    // notation that might leak through from the parent label or rest bucket.
+    // Dedupe in case two raw candidates clean to the same label.
+    const seenLabels = new Set();
+    const candidates = [];
+    for (const raw of rawCandidates) {
+      const clean = cleanLabel(raw);
+      if (!seenLabels.has(clean)) { seenLabels.add(clean); candidates.push(clean); }
+    }
 
     // Score each candidate by walking the roster once. Parse the labels up front.
     const parsedCands = candidates.map(label => ({ label, parsed: parseSpotLabel(label), count: 0, value: 0 }));
@@ -3104,6 +3125,29 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return parsedCands
       .filter(c => c.count > 0)
       .map(c => ({ label: c.label, count: c.count, value: c.value }));
+  }
+
+  // Render a parsed label back into clean, streamer-friendly English. Used to
+  // normalize labels coming out of splits/merges so they never show raw `!X`
+  // notation — only "X (excluding A, B)" form.
+  function formatLabelEnglish(parsed) {
+    if (!parsed || parsed.length === 0) return '';
+    const cap = s => (s && s.length) ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+    function clauseToEnglish(clause) {
+      const includes = (clause.includes || []).map(cap);
+      const excludes = [...new Set((clause.excludes || []).map(t => t.toLowerCase()))].map(cap);
+      const base = includes.join(' ');
+      if (excludes.length === 0) return base;
+      return `${base} (excluding ${excludes.join(', ')})`;
+    }
+    return parsed.map(clauseToEnglish).join('/');
+  }
+
+  // Take any label (with mixed `!` and "(excluding …)" notation), reparse, and
+  // emit clean English. Idempotent.
+  function cleanLabel(label) {
+    const parsed = parseSpotLabel(label);
+    return parsed.length ? formatLabelEnglish(parsed) : label;
   }
 
   // Helper — generates the candidate labels for a split BEFORE filtering by
@@ -3188,18 +3232,28 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     }
 
     // Match if the candidate's card set is within tolerance of the merged set.
-    // Tolerance: ≤ 1% symmetric difference AND ≤ 5 cards. This catches the
-    // Bestow Aura / Saga Creature edge cases where the user's merge produces a
-    // set that's 99%+ identical to "Enchantment (excluding Creature)" but has
-    // a few stragglers from creature-typed enchantment-subtypes.
-    function approxEqual(a, b) {
-      if (a.size === 0 && b.size === 0) return true;
+    // Tolerance: ≤ 5% symmetric difference AND ≤ 30 cards. This catches edge
+    // cases like Constellation creatures, Bestow Auras, and Saga Creatures —
+    // small numbers of cards where the user's intent is clear (a clean label
+    // like "Enchantment") even if the merged union isn't a perfect set match.
+    // The behavior change is small: those edge-case creatures move between
+    // their tribe and the enchantment bucket.
+    function symDiff(a, b) {
+      if (a.size === 0 && b.size === 0) return 0;
       let diff = 0;
       for (const x of a) if (!b.has(x)) diff++;
       for (const x of b) if (!a.has(x)) diff++;
-      const total = a.size + b.size;
-      return diff <= 5 && (total === 0 || diff / total <= 0.01);
+      return diff;
     }
+    function approxEqual(a, b) {
+      const diff = symDiff(a, b);
+      const total = a.size + b.size;
+      return diff <= 30 && (total === 0 || diff / total <= 0.05);
+    }
+    // Among candidates that pass the tolerance, pick the one with the SMALLEST
+    // symmetric diff (best fit). Tied → simplest label (fewest exclusions) wins.
+    let bestMatch = null;
+    let bestDiff = Infinity;
 
     const targetSet = cardSet(originalParsed);
     if (targetSet.size === 0) return null;
@@ -3232,7 +3286,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         const candParsed = parseSpotLabel(candLabel);
         if (!candParsed.length) continue;
         const candSet = cardSet(candParsed);
-        if (approxEqual(candSet, targetSet)) return candLabel;
+        if (!approxEqual(candSet, targetSet)) continue;
+        const diff = symDiff(candSet, targetSet);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestMatch = candLabel;
+        }
       }
     }
 
@@ -3242,10 +3301,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       const candParsed = parseSpotLabel(candLabel);
       if (!candParsed.length) continue;
       const candSet = cardSet(candParsed);
-      if (approxEqual(candSet, targetSet)) return candLabel;
+      if (!approxEqual(candSet, targetSet)) continue;
+      const diff = symDiff(candSet, targetSet);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestMatch = candLabel;
+      }
     }
 
-    return null;
+    return bestMatch;
   }
 
   /**
