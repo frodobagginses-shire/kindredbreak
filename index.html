@@ -3796,7 +3796,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   async function handleDropInput() {
     const query = dom.sldDrop.value.trim();
     state.selectedDrop = null;
-    dom.sldFoil.disabled = true;
+    for (const r of dom.sldFinishRadios()) { r.checked = false; r.disabled = true; }
     dom.addSldBtn.disabled = true;
     if (!state.sldDropsLoaded) { await loadSldDrops(); }
     try { renderDropSuggestions(await searchSecretLairDrops(query)); }
@@ -3871,7 +3871,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   });
   dom.sldDrop.addEventListener('input', () => {
     state.selectedDrop = null;
-    dom.sldFoil.disabled = true;
+    for (const r of dom.sldFinishRadios()) { r.checked = false; r.disabled = true; }
     dom.addSldBtn.disabled = true;
     debouncedHandleDropInput();
   });
