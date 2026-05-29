@@ -372,6 +372,21 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 .tracker-table .col-spot-name { font-weight: 600; }
 .tracker-table .col-spot-ev { font-family: monospace; color: var(--success); font-weight: 600; text-align: right; }
 .tracker-table .col-contrib { font-size: 0.82rem; color: var(--text-secondary); }
+.tracker-table .contrib-toggle {
+  background: none;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.12));
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  margin-left: 0.35rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.tracker-table .contrib-toggle:hover { color: var(--text-secondary); border-color: var(--text-muted); }
 .tracker-table tr.tier-3 .col-spot-name { color: var(--gold); }
 .tracker-table tr.tier-2 .col-spot-name { color: var(--rare); }
 .tracker-table tr.tier-1 .col-spot-name { color: var(--uncommon); }
@@ -688,7 +703,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
       <section id="builder-tiers-section" class="card">
         <div class="card-header">
-          <h2>&#x2B50; Star Tier Settings</h2>
+          <h2>&#x1F3F7;&#xFE0F; Tier Label Settings</h2>
         </div>
         <div class="card-body">
           <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end">
@@ -915,7 +930,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         <p>The Roster table in this tab grows a <strong>Cost/Unit</strong> column. Enter your purchase price per pack, per Secret Lair envelope, or per commander deck. The Cost Summary card shows your total roster cost and a break-even per spot (cost ÷ 100). That break-even is the floor your spot prices need to clear &mdash; <em>before</em> you add givvies, employee costs, or your profit margin.</p>
 
         <h4>Star tiers</h4>
-        <p>Spots are ranked by expected value. The top N go to ⭐⭐⭐, next N to ⭐⭐, next N to ⭐, and the rest plain. You can tune N with the Star Tier Settings card. Default thresholds: top 10 / next 20 / next 30.</p>
+        <p>Spots are ranked by expected value. The top N go to ⭐⭐⭐, next N to ⭐⭐, next N to ⭐, and the rest plain. You can tune N with the Tier Label Settings card. Default thresholds: top 10 / next 20 / next 30.</p>
         <p>If a 3-star spot has a guaranteed hit (SLD card or precon card landing in that spot) priced at or above the notable threshold, the label gets a callout: <code>⭐⭐⭐01 Demonic Tutor Guaranteed Hit ⭐⭐⭐</code>.</p>
 
         <h4>Spot Labels table</h4>
@@ -2236,7 +2251,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     red:   'R', r: 'R',
     green: 'G', g: 'G'
   };
-  const COLOR_NAMES = new Set(['white','blue','black','red','green','colorless','multicolor','multicolored']);
+  const COLOR_NAMES = new Set(['white','blue','black','red','green','colorless','multicolor','multicolored','monocolor','monocolored']);
   // 'tribal' and 'kindred' both kept — WotC renamed the supertype/card-type in 2024;
   // old cards still print "Tribal", new cards print "Kindred". Scryfall returns whichever
   // the printing has, so we accept either spelling.
@@ -2266,6 +2281,10 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // Strip parentheses entirely — they're cosmetic ("Land (excluding Creature)" reads
     // better but parses the same as "Land excluding Creature").
     let s = clause.toLowerCase().trim().replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+    // Collapse the two-word color modifiers so "Mono Colored Creature" parses as
+    // a single `monocolored` term + `creature`, not three separate tokens.
+    s = s.replace(/\bmono[\s-]?colored?\b/g, 'monocolored');
+    s = s.replace(/\bmulti[\s-]?colored?\b/g, 'multicolored');
     // Detect "excluding"/"except" — everything after becomes excludes
     const exclMatch = s.match(/\b(excluding|except)\b/);
     let includesText = s;
@@ -2319,6 +2338,20 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return '';
   }
 
+  // FRONT face's type_line — used for card-identity routing. Cards default to
+  // their front face's type for spot matching: a DFC like "Emeritus of Woe //
+  // Demonic Tutor" (front=Creature, back=Sorcery) is a Creature card, not a
+  // Sorcery card. Same applies to MDFC, Adventure, Omen, and any other layout
+  // where Scryfall's aggregate type_line straddles two card types. For
+  // single-face cards this is identical to fullTypeLine.
+  function frontFaceTypeLine(card) {
+    if (Array.isArray(card.card_faces) && card.card_faces.length > 0 && card.card_faces[0].type_line) {
+      return card.card_faces[0].type_line.toLowerCase();
+    }
+    if (card.type_line) return card.type_line.toLowerCase();
+    return '';
+  }
+
   function cardSubtypes(card) {
     const out = [];
     const lines = [];
@@ -2343,8 +2376,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     'saga', 'aura', 'class', 'case', 'equipment', 'vehicle',
   ]);
   function primaryCreatureSubtype(card) {
-    const tl = card.type_line || '';
-    if (!tl.toLowerCase().includes('creature')) return null;
+    // Use FRONT face only — a Prepared DFC like "Emeritus of Woe // Demonic
+    // Tutor" has aggregate type_line "Creature — Vampire Warlock // Sorcery";
+    // we want "vampire" from the front face, not the back face's "sorcery" or
+    // tokens leaking across the // separator.
+    const tl = frontFaceTypeLine(card);
+    if (!tl.includes('creature')) return null;
     const dash = tl.indexOf('—');
     if (dash < 0) return null;
     const after = tl.substring(dash + 1).trim();
@@ -2358,7 +2395,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
 
   function isCreature(card) {
-    return fullTypeLine(card).includes('creature');
+    return frontFaceTypeLine(card).includes('creature');
   }
 
   /**
@@ -2373,10 +2410,14 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       const cols = cardColors(card);
       if (t === 'colorless') return cols.length === 0;
       if (t === 'multicolor' || t === 'multicolored') return cols.length >= 2;
+      if (t === 'monocolor' || t === 'monocolored') return cols.length === 1;
       return cols.includes(COLOR_TERMS[t]);
     }
 
-    const typeLine = fullTypeLine(card);
+    // Card identity = FRONT face. DFCs (Prepared, MDFC, Adventure, Omen,
+    // transform, etc.) match their front face's card type only — a creature with
+    // a stapled sorcery back is a Creature, not a Sorcery.
+    const typeLine = frontFaceTypeLine(card);
     if (SUPERTYPES.has(t)) return new RegExp(`\\b${escapeRegex(t)}\\b`).test(typeLine);
     if (CARD_TYPES.has(t))  return new RegExp(`\\b${escapeRegex(t)}\\b`).test(typeLine);
 
@@ -2762,7 +2803,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     function addCard(card, price) {
       const r = card.rarity;
       if (r !== 'rare' && r !== 'mythic') return;
-      const typeLine = (card.type_line || '').toLowerCase();
+      // Front-face identity: a DFC like "Emeritus of Woe // Demonic Tutor" is a
+      // Creature card, not a Sorcery card. Use front face only.
+      const typeLine = frontFaceTypeLine(card);
       const isCreatureCard = typeLine.includes('creature');
       const isLegendary = /\blegendary\b/.test(typeLine);
       const colorCode = getCardColorCode(card);
@@ -3049,7 +3092,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       return false;
     }
     forEachRMCard(rosterEntries, (card, value) => {
-      const typeLine = (card.type_line || '').toLowerCase();
+      // Front-face identity — Prepared DFCs etc. route by front face only.
+      const typeLine = frontFaceTypeLine(card);
       const isCreature = typeLine.includes('creature');
       if (isCreature) {
         // Creatures trump everything — go to the primary creature tribe.
@@ -3220,6 +3264,38 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     const originalParsed = parseSpotLabel(originalLabel);
     if (originalParsed.length < 2) return null;
 
+    // Special-case: if the merged label is the five mono-color variants of a
+    // single tribe / type (e.g. "White Human / Blue Human / Black Human /
+    // Red Human / Green Human", or "White Creature / Blue Creature / ..."),
+    // collapse it to "Mono Colored <Tribe>". This is the canonical "merge all
+    // five colors of this tribe" gesture in a Kindred Break — the user wants a
+    // single clean spot, not a slash-separated wall of colors.
+    {
+      const COLOR_WORDS = ['white', 'blue', 'black', 'red', 'green'];
+      const segments = originalLabel.split('/').map(s => s.trim()).filter(Boolean);
+      if (segments.length === 5) {
+        const colorsFound = new Set();
+        const restsFound = new Set();
+        let restDisplay = null;
+        let ok = true;
+        for (const seg of segments) {
+          const tokens = seg.split(/\s+/).filter(Boolean);
+          if (tokens.length < 2) { ok = false; break; }
+          const color = tokens[0].toLowerCase();
+          if (!COLOR_WORDS.includes(color)) { ok = false; break; }
+          colorsFound.add(color);
+          const restRaw = tokens.slice(1).join(' ');
+          const restKey = restRaw.toLowerCase();
+          restsFound.add(restKey);
+          // Preserve the first segment's original capitalization for display.
+          if (restDisplay === null) restDisplay = restRaw;
+        }
+        if (ok && colorsFound.size === 5 && restsFound.size === 1) {
+          return `Mono Colored ${restDisplay}`;
+        }
+      }
+    }
+
     function cardKey(card) {
       return `${(card.set || '').toLowerCase()}_${card.collector_number || ''}_${card.name || ''}`;
     }
@@ -3350,7 +3426,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     const buckets = new Map(); // name → { count, value, sample: [cardName] }
 
     function classify(card) {
-      const typeLine = (card.type_line || '').toLowerCase();
+      // Front-face identity — Prepared DFCs etc. classify by front face only.
+      const typeLine = frontFaceTypeLine(card);
       const isCreatureCard = typeLine.includes('creature');
       const isLegendary = /\blegendary\b/.test(typeLine);
       if (isCreatureCard) {
@@ -5024,19 +5101,30 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       const rmEV = spotEV[i];
       const effectiveEV = rmEV + bulkPerSpot;
       const tier = tierByIdx.get(i) || 0;
-      const { top, overflow } = contrib[i] || { top: [], overflow: 0 };
+      const { top, rest } = contrib[i] || { top: [], rest: [] };
       const tr = document.createElement('tr');
       tr.className = `tier-${tier}`;
       tr.dataset.spotId = String(spot.id);
       if (state.hitSpots.has(spot.id)) tr.classList.add('hit');
-      const contribHtml = top.length
-        ? top.map(c => {
-            const img = imageUrlForCard(c.card);
-            const imgAttr = img ? ` data-image-url="${escHtml(img)}"` : '';
-            const tag = c.guaranteed ? ' ⓖ' : '';
-            return `<span${imgAttr} title="${escHtml(c.card.name)} • ${formatPrice(c.ev)}${c.guaranteed ? ' guaranteed' : ''}">${escHtml(c.card.name)}${tag}</span>`;
-          }).join(', ') + (overflow > 0 ? `, +${overflow} more` : '')
-        : '<span style="color:var(--text-muted)">—</span>';
+      const renderContribCard = (c) => {
+        const img = imageUrlForCard(c.card);
+        const imgAttr = img ? ` data-image-url="${escHtml(img)}"` : '';
+        const tag = c.guaranteed ? ' ⓖ' : '';
+        return `<span${imgAttr} title="${escHtml(c.card.name)} • ${formatPrice(c.ev)}${c.guaranteed ? ' guaranteed' : ''}">${escHtml(c.card.name)}${tag}</span>`;
+      };
+      let contribHtml;
+      if (top.length === 0) {
+        contribHtml = '<span style="color:var(--text-muted)">—</span>';
+      } else if (rest.length === 0) {
+        contribHtml = top.map(renderContribCard).join(', ');
+      } else {
+        // Top visible + hidden "rest" span + expand toggle. The toggle button
+        // sits inline at the end of the cell — clicking it reveals every
+        // remaining contributor so the streamer can audit a spot in full.
+        const topHtml = top.map(renderContribCard).join(', ');
+        const restHtml = ', ' + rest.map(renderContribCard).join(', ');
+        contribHtml = `<span class="contrib-top">${topHtml}</span><span class="contrib-rest hidden">${restHtml}</span> <button type="button" class="contrib-toggle" data-rest-count="${rest.length}" aria-expanded="false">&#x25B8; +${rest.length} more</button>`;
+      }
       const evTooltip = `R/M EV: ${formatPrice(rmEV)} + avg Bulk share: ${formatPrice(bulkPerSpot)} = ${formatPrice(effectiveEV)}`;
       tr.innerHTML = `
         <td class="col-tracker-tier">${tier > 0 ? '★'.repeat(tier) : ''}</td>
@@ -5046,6 +5134,19 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       `;
       tr.addEventListener('click', (e) => {
         if (e.target.closest('[data-image-url]')) return;
+        const toggleBtn = e.target.closest('.contrib-toggle');
+        if (toggleBtn) {
+          e.stopPropagation();
+          const td = toggleBtn.closest('.col-contrib');
+          const restSpan = td && td.querySelector('.contrib-rest');
+          if (!restSpan) return;
+          const willExpand = restSpan.classList.contains('hidden');
+          restSpan.classList.toggle('hidden');
+          const restCount = toggleBtn.dataset.restCount;
+          toggleBtn.innerHTML = willExpand ? '&#x25BE; Collapse' : `&#x25B8; +${restCount} more`;
+          toggleBtn.setAttribute('aria-expanded', willExpand ? 'true' : 'false');
+          return;
+        }
         toggleSpotHit(spot.id);
       });
       tbody.appendChild(tr);
@@ -5179,10 +5280,11 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     dom.simResults.classList.remove('hidden');
     dom.simSpotsGrid.innerHTML = '';
 
-    // Show user-defined spots in priority order, then Bulk, then Last Spot if populated
+    // Sort user-defined spots high to low by simulated final value, then pin
+    // Bulk and Last Spot to the end of the grid. Stable on ties via spotIndex.
     const userSpots = simResult.results
       .filter(r => !r.isBulk && !r.isLastSpot)
-      .sort((a, b) => a.spotIndex - b.spotIndex);
+      .sort((a, b) => (b.finalValue || 0) - (a.finalValue || 0) || a.spotIndex - b.spotIndex);
     const bulk = simResult.results.find(r => r.isBulk);
     const last = simResult.results.find(r => r.isLastSpot);
 
@@ -5339,56 +5441,75 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
   // ─── Show Notes Generator ───
 
+  /**
+   * Group the roster into the four compact buckets used in WhatNot show notes:
+   *   - Play: non-collector boosters, aggregated by set code ("SOS x30, DFT x6")
+   *   - CBs:  collector boosters, aggregated by set code
+   *   - Precons: just the deck name (no set code), each entry separately
+   *   - SLDs: just the drop name, each entry separately
+   */
   function showNotesContentsLines() {
-    const lines = [];
-    let totalBoosters = 0;
+    const playByCode = new Map();
+    const cbByCode = new Map();
+    const preconEntries = [];
+    const sldEntries = [];
+
     for (const e of state.roster) {
       const q = e.quantity || 1;
       if (e.productType === 'booster') {
-        const code = (e.setCode || '').toUpperCase();
-        const setName = e.setName && e.setName !== code ? ` — ${e.setName}` : '';
-        const type = e.boosterType ? String(e.boosterType).replace(/booster/i,'').trim() || e.boosterType : '';
-        lines.push(`${code} ${type} x${q}${setName}`.replace(/\s+/g,' ').trim());
-        totalBoosters += q;
+        const code = (e.setCode || '').toUpperCase() || '?';
+        const isCollector = String(e.boosterType || '').toLowerCase().includes('collector');
+        const target = isCollector ? cbByCode : playByCode;
+        target.set(code, (target.get(code) || 0) + q);
       } else if (e.productType === 'commander_precon') {
-        const code = (e.setCode || '').toUpperCase();
-        const setName = e.setName && e.setName !== code ? ` — ${e.setName}` : '';
-        const deck = e.deckName ? ` "${e.deckName}"` : '';
-        lines.push(`${code} Commander Precon${deck} x${q}${setName}`);
+        const name = e.deckName || e.setName || (e.setCode || '').toUpperCase() || 'Precon';
+        preconEntries.push({ name, q });
       } else if (e.productType === 'secret_lair') {
         const name = e.dropName || e.dropKey || 'Drop';
-        const finish = e.finish && e.finish !== 'nonfoil' ? ` (${e.finish})` : '';
-        lines.push(`Secret Lair: ${name}${finish} x${q}`);
+        sldEntries.push({ name, q });
       }
     }
-    return { lines, totalBoosters };
+
+    const fmtMap = (m) => [...m.entries()].map(([code, q]) => `${code} x${q}`).join(', ');
+    return {
+      playLine: fmtMap(playByCode),
+      cbLine: fmtMap(cbByCode),
+      preconEntries,
+      sldEntries,
+    };
   }
 
   function generateShowNotes() {
-    const { lines: contents, totalBoosters } = showNotesContentsLines();
+    const { playLine, cbLine, preconEntries, sldEntries } = showNotesContentsLines();
     const tiers = state.starTiers || { three: 10, two: 20, one: 30 };
-    const insurance = parseFloat(dom.builderInsurance?.value || '5') || 5;
-    const insuranceStr = `$${insurance.toFixed(2)}`;
-    const spotCount = (state.spots && state.spots.length) || 0;
+    const labels = state.starLabels || { three: '⭐⭐⭐', two: '⭐⭐', one: '⭐' };
 
     const parts = [];
-    parts.push('Play Break Contents:');
-    if (contents.length === 0) {
-      parts.push('  (Add products to your roster — they will appear here)');
-    } else {
-      for (const line of contents) parts.push(line);
-      if (totalBoosters > 0) parts.push(`(${totalBoosters} boosters total)`);
+    if (playLine) {
+      parts.push('Play: ');
+      parts.push(playLine);
+      parts.push('');
     }
-    parts.push('');
-    parts.push('Collector Boosters added determined by break will be shown on screen!');
-    parts.push('');
-    parts.push(`⭐⭐⭐ = Top ${tiers.three} spots — biggest hits & most cards 🔥`);
-    parts.push(`⭐⭐ = Next ${tiers.two} spots — still hits often, decent upside 📈`);
-    parts.push(`⭐ = Next ${tiers.one} spots — outside shot, often not big value 🎯`);
+    if (preconEntries.length) {
+      parts.push('Precon: ');
+      for (const p of preconEntries) parts.push(p.q > 1 ? `${p.name} x${p.q}` : p.name);
+      parts.push('');
+    }
+    if (cbLine) {
+      parts.push('CBs: ');
+      parts.push(cbLine);
+      parts.push('');
+    }
+    if (sldEntries.length) {
+      parts.push('SLD');
+      for (const s of sldEntries) parts.push(s.q > 1 ? `${s.name} x${s.q}` : s.name);
+      parts.push('');
+    }
+    parts.push(`${labels.three} = Top ${tiers.three} spots: biggest hits & most cards 🔥`);
+    parts.push(`${labels.two} = Next ${tiers.two} spots: still hits often, decent upside 📈`);
+    parts.push(`${labels.one} = Next ${tiers.one} spots: outside shot, often not big value 🎯`);
     parts.push('NO STAR = Hard-to-hit spots, often insurance 🛟');
-    parts.push('');
-    parts.push('ANY SPOT CAN WIFF!!! THEY ARE BOOSTERS!! 🎲');
-    parts.push('');
+    parts.push('ANY SPOT CAN WIFF: THEY ARE PACKS! 🎲');
     parts.push('• Once all spots fill, all pictured packs are ripped LIVE 🎥');
     parts.push('• All Rares & Mythics (UNLESS LISTED OTHERWISE) are sorted by Kindred (creature type) or Card Type 🧬');
     parts.push('');
@@ -5397,14 +5518,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     parts.push('Example: Merfolk Bard Wizard → 🐟 Merfolk Kindred');
     parts.push('');
     parts.push(`Any spot with no "hits" (Typically Rares/Mythics) receives:`);
-    parts.push(`👉 ${insuranceStr} Pack Insurance 🎁`);
-    parts.push('');
+    parts.push(`👉 Play Pack Insurance 🎁`);
     parts.push('• No refunds after randomizer spins ⛔');
     parts.push('• Missed kindred / art cards go to the FINAL SPOT SOLD 🏁');
-    if (spotCount && spotCount !== 100) {
-      parts.push('');
-      parts.push(`(${spotCount} spots in this break)`);
-    }
     return parts.join('\n');
   }
 
@@ -5499,17 +5615,19 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
 
   /**
-   * Build the user-facing label for a spot.
+   * Build the user-facing label for a spot. Marker is a single PREFIX — no
+   * trailing mirror copy.
    * Examples (default markers):
-   *   ⭐⭐⭐01⭐⭐⭐
-   *   ⭐⭐⭐01 Demonic Tutor Guaranteed Hit ⭐⭐⭐
-   *   ⭐⭐67⭐⭐
-   *   ⭐91⭐
-   *   45
+   *   ⭐⭐⭐ Land
+   *   ⭐⭐⭐ Demonic Tutor Guaranteed Hit
+   *   ⭐⭐ Saga
+   *   ⭐ Equipment
+   *   Sorcery
    * With custom markers (e.g., "Nasty" / "Diabolical" / "Filthy"):
-   *   Nasty 01 Demonic Tutor Guaranteed Hit Nasty
-   *   Diabolical 67 Diabolical
-   *   Filthy 91 Filthy
+   *   Nasty Land
+   *   Nasty Demonic Tutor Guaranteed Hit
+   *   Diabolical Saga
+   *   Filthy Equipment
    */
   function buildSpotLabel(spotLabel, tier, guaranteedHighlight) {
     if (tier === 0) return spotLabel;
@@ -5517,9 +5635,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // Word-based markers get a space separator; emoji markers stay tight to the spot name.
     const sep = /[A-Za-z0-9]/.test(marker.charAt(0)) ? ' ' : '';
     if (tier === 3 && guaranteedHighlight) {
-      return `${marker}${sep}${spotLabel} ${guaranteedHighlight} Guaranteed Hit ${marker}`;
+      return `${marker}${sep}${spotLabel} ${guaranteedHighlight} Guaranteed Hit`;
     }
-    return `${marker}${sep}${spotLabel}${sep}${marker}`;
+    return `${marker}${sep}${spotLabel}`;
   }
 
   /**
@@ -5644,7 +5762,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
     return perSpot.map(m => {
       const arr = [...m.values()].sort((a, b) => b.ev - a.ev);
-      return { top: arr.slice(0, limit), overflow: Math.max(0, arr.length - limit) };
+      return { top: arr.slice(0, limit), rest: arr.slice(limit) };
     });
   }
 
@@ -5827,7 +5945,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // Build temp labels using the same rule as buildSpotLabel
     function previewLabel(num, marker) {
       const sep = /[A-Za-z0-9]/.test(marker.charAt(0)) ? ' ' : '';
-      return `${marker}${sep}${num}${sep}${marker}`;
+      return `${marker}${sep}${num}`;
     }
     preview.innerHTML = `Preview: <code>${escHtml(previewLabel('01', three))}</code> &middot; <code>${escHtml(previewLabel('67', two))}</code> &middot; <code>${escHtml(previewLabel('91', one))}</code>`;
   }
@@ -6398,7 +6516,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     },
     {
       target: '#builder-tiers-section',
-      title: 'Star Tier Settings',
+      title: 'Tier Label Settings',
       body: 'Top 10 by EV get ⭐⭐⭐, next 20 get ⭐⭐, next 30 get ⭐, rest are plain. Click <strong>Change Star Labels</strong> to swap stars for emoji (🔥🔥🔥) or words like "Nasty" / "Diabolical" / "Filthy" — whatever fits your brand.',
       placement: 'top'
     },
