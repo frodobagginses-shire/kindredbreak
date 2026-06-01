@@ -6,6 +6,7 @@
   <title>MTG Kindred Break Calculator & Simulator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
 :root {
   --bg-primary: #0d1117;
@@ -746,7 +747,10 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       <section id="builder-table-section" class="card">
         <div class="card-header">
           <h2>&#x1F3AF; Spot Labels</h2>
-          <button id="copy-all-labels-btn" class="btn btn-sm btn-accent">&#x1F4CB; Copy All Labels</button>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            <button id="copy-all-labels-btn" class="btn btn-sm btn-accent">&#x1F4CB; Copy All Labels</button>
+            <button id="download-sort-assistant-btn" class="btn btn-sm" title="Download a printable landscape PDF for physically sorting cards after the break">&#x1F5C2;&#xFE0F; Sort Assistant (PDF)</button>
+          </div>
         </div>
         <div class="card-body">
           <div id="builder-table-wrapper">
@@ -2574,7 +2578,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
    * spot, respecting priority. Cards that match no spot accumulate in
    * lastSpotEV; C/U go to bulkEV.
    *
-   * @returns { spotEV: number[], lastSpotEV: number, bulkEV: number, totalEV: number }
+   * @returns { spotEV: number[], spotCounts: number[], lastSpotEV: number, lastSpotCount: number, bulkEV: number, totalEV: number }
    */
   function analyzeSpotDistribution(rosterEntries, spots) {
     // spotEV[i] holds R/M expected value for spot i.
@@ -2583,12 +2587,17 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // lastSpotEV is R/M that doesn't match any defined spot.
     const spotEV = spots.map(() => 0);
     let lastSpotEV = 0;
+    // Parallel to spotEV: expected NUMBER of R/M cards landing in each spot.
+    // Used by the Sort Assistant PDF to tell the sorter how big a pile to expect.
+    const spotCounts = spots.map(() => 0);
+    let lastSpotCount = 0;
 
-    function assignRM(card, ev) {
+    function assignRM(card, ev, count) {
       for (let i = 0; i < spots.length; i++) {
-        if (cardMatchesSpot(card, spots[i].parsed)) { spotEV[i] += ev; return; }
+        if (cardMatchesSpot(card, spots[i].parsed)) { spotEV[i] += ev; spotCounts[i] += count; return; }
       }
       lastSpotEV += ev;
+      lastSpotCount += count;
     }
 
     for (const entry of rosterEntries) {
@@ -2596,7 +2605,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         const finish = entry.finish || (entry.foil ? 'foil' : 'nonfoil');
         for (const card of (entry.dropCards || [])) {
           if (card.rarity === 'common' || card.rarity === 'uncommon') continue;
-          assignRM(card, getCardPrice(card, finish) * entry.quantity);
+          assignRM(card, getCardPrice(card, finish) * entry.quantity, entry.quantity);
         }
         continue;
       }
@@ -2604,7 +2613,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         for (const card of (entry.deckCards || [])) {
           if (card.rarity === 'common' || card.rarity === 'uncommon') continue;
           const isFoil = !!card.__isFoil;
-          assignRM(card, getCardPrice(card, isFoil) * entry.quantity);
+          assignRM(card, getCardPrice(card, isFoil) * entry.quantity, entry.quantity);
         }
         continue;
       }
@@ -2612,14 +2621,14 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       if (!dist) continue;
       const q = entry.quantity || 1;
       for (const { card, probability, isFoil } of dist) {
-        assignRM(card, getCardPrice(card, isFoil ? 'foil' : 'nonfoil') * probability * q);
+        assignRM(card, getCardPrice(card, isFoil ? 'foil' : 'nonfoil') * probability * q, probability * q);
       }
     }
 
     const bulkEV = calculateBulkEV(rosterEntries);
     const bulkPerSpot = spots.length > 0 ? bulkEV / spots.length : 0;
     const totalEV = spotEV.reduce((s, v) => s + v, 0) + lastSpotEV + bulkEV;
-    return { spotEV, lastSpotEV, bulkEV, bulkPerSpot, totalEV };
+    return { spotEV, spotCounts, lastSpotEV, lastSpotCount, bulkEV, bulkPerSpot, totalEV };
   }
 
   // ─── Expected insurance impact ───
@@ -3633,6 +3642,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     builderTbody: $('builder-tbody'),
     builderEmpty: $('builder-empty'),
     copyAllLabelsBtn: $('copy-all-labels-btn'),
+    sortAssistantBtn: $('download-sort-assistant-btn'),
     showNotesText: $('shownotes-text'),
     regenShowNotesBtn: $('regen-shownotes-btn'),
     copyShowNotesBtn: $('copy-shownotes-btn'),
@@ -5915,6 +5925,311 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     copyToClipboard(lines.join('\n'));
   });
 
+  // ─── Sort Assistant PDF ───
+  //
+  // A printable, landscape, multi-page sorting guide the streamer downloads to
+  // use AFTER the break, while physically distributing pulled Rare/Mythic cards
+  // into piles. Page 1 is a coarse-sort master (split the pile by main card type
+  // first); then one or more detail pages per main type (spots sorted A–Z), each
+  // spot getting a tall empty zone for its physical stack (the stack can hang
+  // below the page edge if needed); finally a catch-all page (Final Spot / Bulk /
+  // Misfits). Star tiers and ~expected card counts match the overlay Spot Labels.
+
+  const SORT_TYPE_ORDER = ['Land', 'Planeswalker', 'Battle', 'Enchantment', 'Artifact', 'Instant', 'Sorcery', 'Creature'];
+
+  // Color-split spots (e.g. "White Human", "Blue Human") should still alphabetize
+  // by their base type ("Human"), then break ties in WUBRG → Multi → Colorless
+  // order so the sorter flips to H once and finds every Human stack grouped.
+  const COLOR_RANK = { white: 0, blue: 1, black: 2, red: 3, green: 4, multicolor: 5, multicolored: 5, multi: 5, gold: 5, rainbow: 5, colorless: 6 };
+  function spotSortKey(label) {
+    const m = label.match(/^(\S+)\s+(.+)$/);
+    if (m) {
+      const c = COLOR_RANK[m[1].toLowerCase()];
+      if (c !== undefined) return { base: m[2].trim().toLowerCase(), rank: c };
+    }
+    return { base: label.toLowerCase(), rank: -1 };
+  }
+  function compareSpots(a, b) {
+    const ka = spotSortKey(a.label), kb = spotSortKey(b.label);
+    return ka.base.localeCompare(kb.base, undefined, { sensitivity: 'base' })
+      || (ka.rank - kb.rank)
+      || a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+  }
+
+  function sortAssistantData() {
+    const dist = analyzeSpotDistribution(state.roster, state.spots);
+    const counts = dist.spotCounts || state.spots.map(() => 0);
+    // Rank by R/M EV → star tier (mirrors the overlay Spot Labels table so the
+    // printed stars match what buyers saw on stream).
+    const ranked = dist.spotEV
+      .map((ev, i) => ({ idx: i, ev }))
+      .sort((a, b) => b.ev - a.ev || a.idx - b.idx);
+    const rankByIdx = new Map();
+    ranked.forEach((r, i) => rankByIdx.set(r.idx, i));
+
+    const spots = state.spots.map((s, i) => ({
+      label: s.label,
+      tier: getStarTier(rankByIdx.get(i)),
+      count: counts[i] || 0,
+      bucket: spotTypeBucket(s.label).name,
+    }));
+
+    const groups = new Map();
+    for (const sp of spots) {
+      if (!groups.has(sp.bucket)) groups.set(sp.bucket, []);
+      groups.get(sp.bucket).push(sp);
+    }
+    const orderedGroups = [];
+    for (const name of SORT_TYPE_ORDER) {
+      if (groups.has(name)) {
+        const arr = groups.get(name).sort(compareSpots);
+        orderedGroups.push({ name, spots: arr });
+      }
+    }
+    return { orderedGroups, lastSpotCount: dist.lastSpotCount || 0 };
+  }
+
+  // Pack groups into detail pages of `per` cells each. Creatures (usually the
+  // bulk) keep their own pages; the smaller non-creature types are packed
+  // together greedily so e.g. Land + Planeswalker + Instant can share one sheet.
+  // Returns [{ cells:[{sp,type}], types:[name,...] }].
+  function buildDetailPages(orderedGroups, per) {
+    const pages = [];
+    let cur = null;
+    const fresh = () => { cur = { cells: [], types: [] }; pages.push(cur); return cur; };
+    for (const g of orderedGroups) {
+      if (g.name === 'Creature') {
+        for (let i = 0; i < g.spots.length; i += per) {
+          const pg = { cells: [], types: ['Creature'] };
+          for (const sp of g.spots.slice(i, i + per)) pg.cells.push({ sp, type: 'Creature' });
+          pages.push(pg);
+        }
+        cur = null; // don't let later types share a creature page
+        continue;
+      }
+      for (const sp of g.spots) {
+        if (!cur || cur.cells.length >= per) fresh();
+        cur.cells.push({ sp, type: g.name });
+        if (!cur.types.includes(g.name)) cur.types.push(g.name);
+      }
+    }
+    return pages;
+  }
+
+  function fmtSortCount(n) {
+    if (!n || n <= 0) return '0';
+    if (n < 1) return '<1';
+    return '~' + Math.round(n);
+  }
+
+  // Draw a single filled gold star centred at (cx, cy) with outer radius r.
+  function pdfStar(doc, cx, cy, r) {
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+      const ang = -Math.PI / 2 + i * Math.PI / 5;
+      const rad = (i % 2 === 0) ? r : r * 0.42;
+      pts.push([cx + rad * Math.cos(ang), cy + rad * Math.sin(ang)]);
+    }
+    const rel = [];
+    for (let i = 1; i < pts.length; i++) rel.push([pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]]);
+    doc.setFillColor(245, 179, 1);
+    doc.lines(rel, pts[0][0], pts[0][1], [1, 1], 'F', true);
+  }
+
+  // Fit text into maxW at up to 2 lines, shrinking font from maxSize to minSize.
+  function pdfFitTitle(doc, text, maxW, maxSize, minSize) {
+    for (let fs = maxSize; fs >= minSize; fs--) {
+      doc.setFontSize(fs);
+      const lines = doc.splitTextToSize(text, maxW);
+      if (lines.length <= 2) return { fs, lines };
+    }
+    doc.setFontSize(minSize);
+    let lines = doc.splitTextToSize(text, maxW);
+    if (lines.length > 2) {
+      lines = lines.slice(0, 2);
+      let last = lines[1];
+      while (doc.getTextWidth(last + '…') > maxW && last.length > 1) last = last.slice(0, -1);
+      lines[1] = last + '…';
+    }
+    return { fs: minSize, lines };
+  }
+
+  // A spot cell: title bar (stars + name + ~count) and a tall empty pile zone.
+  // On combined (multi-type) pages, pass `typeTag` to print a small uppercase
+  // type label above the title so every card stack is self-identifying.
+  function drawSpotCell(doc, x, y, w, h, sp, typeTag) {
+    const titleH = typeTag ? 44 : 32;
+    doc.setDrawColor(110); doc.setLineWidth(0.8);
+    doc.rect(x, y, w, h);
+    doc.setFillColor(243, 244, 246);
+    doc.rect(x, y, w, titleH, 'F');
+    doc.setDrawColor(110); doc.line(x, y + titleH, x + w, y + titleH);
+
+    let barTop = y;
+    if (typeTag) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(6.5); doc.setTextColor(120, 120, 130);
+      doc.text(typeTag.toUpperCase(), x + 6, y + 11);
+      barTop = y + 13;
+    }
+    const cy = barTop + ((y + titleH) - barTop) / 2;
+    const tx = x + 6;
+    const starR = 4.3;
+    const starBlockW = sp.tier > 0 ? sp.tier * (starR * 2 + 2) + 6 : 0;
+
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(110);
+    const ctxt = fmtSortCount(sp.count);
+    const cw = doc.getTextWidth(ctxt);
+    doc.text(ctxt, x + w - 5 - cw, cy + 3);
+
+    // Name first, then star tier to the right of the name, then ~count far right.
+    doc.setFont('helvetica', 'bold'); doc.setTextColor(25, 25, 30);
+    const nameMaxW = Math.max((x + w - 5 - cw - 6) - tx - starBlockW, 30);
+    const fit = pdfFitTitle(doc, sp.label, nameMaxW, 11, 7);
+    doc.setFontSize(fit.fs);
+    const lineH = fit.fs + 1.5;
+    let ty = cy - ((fit.lines.length - 1) * lineH) / 2 + fit.fs * 0.35;
+    let maxLineW = 0;
+    for (const ln of fit.lines) { doc.text(ln, tx, ty); const lw = doc.getTextWidth(ln); if (lw > maxLineW) maxLineW = lw; ty += lineH; }
+    if (sp.tier > 0) {
+      let sx = tx + maxLineW + 6 + starR;
+      for (let i = 0; i < sp.tier; i++) { pdfStar(doc, sx, cy, starR); sx += starR * 2 + 2; }
+    }
+  }
+
+  // A large staging zone (coarse-sort buckets & catch-all piles). The header band
+  // auto-sizes to the wrapped title + subtitle so nothing overlaps regardless of
+  // zone width or text length.
+  function drawBigZone(doc, x, y, w, h, title, subtitle) {
+    const pad = 8, subFS = 8.5, subLineH = 11;
+    doc.setFont('helvetica', 'bold');
+    const tfit = pdfFitTitle(doc, title, w - 16, 15, 11);
+    const titleLineH = tfit.fs + 3;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(subFS);
+    const subLines = subtitle ? doc.splitTextToSize(subtitle, w - 16).slice(0, 2) : [];
+    const titleH = pad + tfit.lines.length * titleLineH + (subLines.length ? 2 + subLines.length * subLineH : 0) + 5;
+
+    doc.setDrawColor(110); doc.setLineWidth(1);
+    doc.rect(x, y, w, h);
+    doc.setFillColor(236, 239, 243);
+    doc.rect(x, y, w, titleH, 'F');
+    doc.setDrawColor(110); doc.line(x, y + titleH, x + w, y + titleH);
+
+    doc.setFont('helvetica', 'bold'); doc.setTextColor(20); doc.setFontSize(tfit.fs);
+    let ty = y + pad + tfit.fs;
+    for (const ln of tfit.lines) { doc.text(ln, x + 8, ty); ty += titleLineH; }
+    if (subLines.length) {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(subFS); doc.setTextColor(110);
+      let sy = y + pad + tfit.lines.length * titleLineH + subFS;
+      for (const ln of subLines) { doc.text(ln, x + 8, sy); sy += subLineH; }
+    }
+  }
+
+  function pdfPageHeader(doc, title, note, pageNum, totalPages) {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(20);
+    doc.text(title, 28, 30);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(120);
+    if (note) doc.text(note, 28, 44);
+    const pg = `Page ${pageNum} / ${totalPages}`;
+    const pw = doc.getTextWidth(pg);
+    doc.text(pg, 792 - 28 - pw, 30);
+  }
+
+  function generateSortAssistantPDF() {
+    if (!rosterIsReady()) { showToast('Lock your roster first', 'error'); return; }
+    if (!state.spots.length) { showToast('Define at least one spot first', 'error'); return; }
+    const ns = window.jspdf;
+    if (!ns || !ns.jsPDF) { showToast('PDF library not loaded — check your connection and retry', 'error'); return; }
+
+    showLoading('Building Sort Assistant PDF...');
+    setTimeout(() => {
+      try {
+        const { orderedGroups, lastSpotCount } = sortAssistantData();
+        if (!orderedGroups.length) { hideLoading(); showToast('No spots to sort', 'error'); return; }
+
+        const doc = new ns.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+        const PW = 792, PH = 612, M = 28, BOT = 16;
+        // Detail pile grid: 3 across × 2 down. The bottom row is intentionally
+        // pushed past the page edge (rowH is taller than would fit) so each pile
+        // gets maximum height — card stacks for row 2 simply hang below the sheet.
+        const COLS = 3, ROWS = 2, CGAP = 12, RGAP = 14;
+        const gridTop = 62;
+        const gridW = PW - 2 * M;
+        const colW = (gridW - (COLS - 1) * CGAP) / COLS;
+        const rowH = 300; // > (PH-gridTop)/2 on purpose → row 2 overflows the page
+        const cellXY = (slot) => {
+          const c = slot % COLS, r = Math.floor(slot / COLS);
+          return [M + c * (colW + CGAP), gridTop + r * (rowH + RGAP)];
+        };
+        const per = COLS * ROWS; // 6 cells per detail page
+
+        const detailPagesArr = buildDetailPages(orderedGroups, per);
+        const totalPages = 1 + detailPagesArr.length + 1;
+
+        let pageNum = 0, first = true;
+        const newPage = () => { if (!first) doc.addPage(); first = false; pageNum++; };
+
+        // PAGE 1 — coarse sort master (own grid; always fits one page)
+        newPage();
+        pdfPageHeader(doc, 'Sort Assistant — Step 1: Coarse Sort',
+          'Split the whole pile into these main-type stacks first, then sort each stack using the detail pages that follow.',
+          pageNum, totalPages);
+        const nT = orderedGroups.length;
+        const cCols = Math.min(4, nT);
+        const cRows = Math.ceil(nT / cCols);
+        const cColW = (gridW - (cCols - 1) * CGAP) / cCols;
+        const cGridH = PH - gridTop - BOT;
+        // When there are 2 rows of coarse buckets, push the bottom row past the
+        // page edge too (taller zones) — same treatment as the detail pages.
+        const cRowH = cRows >= 2 ? rowH : cGridH;
+        orderedGroups.forEach((g, i) => {
+          const c = i % cCols, r = Math.floor(i / cCols);
+          const x = M + c * (cColW + CGAP), y = gridTop + r * (cRowH + RGAP);
+          const tot = g.spots.reduce((s, sp) => s + sp.count, 0);
+          drawBigZone(doc, x, y, cColW, cRowH, g.name, `${g.spots.length} spot${g.spots.length === 1 ? '' : 's'} · ${fmtSortCount(tot)} cards expected`);
+        });
+
+        // DETAIL PAGES — packed (small non-creature types combined per sheet)
+        for (const pg of detailPagesArr) {
+          newPage();
+          const multi = pg.types.length > 1;
+          const title = multi ? `Main Types: ${pg.types.join(', ')}` : `Main Type: ${pg.types[0]}`;
+          const note = multi
+            ? 'Combined to save paper — each card stack is tagged with its type · sorted A–Z within type'
+            : 'Sorted A–Z · ★ tiers & ~counts match your overlay';
+          pdfPageHeader(doc, title, note, pageNum, totalPages);
+          pg.cells.forEach((cell, idx) => {
+            const [x, y] = cellXY(idx);
+            drawSpotCell(doc, x, y, colW, rowH, cell.sp, multi ? cell.type : null);
+          });
+        }
+
+        // CATCH-ALL PAGE — three big piles
+        newPage();
+        pdfPageHeader(doc, 'Catch-All Piles',
+          'Cards that do not belong to a sellable R/M spot. Keep these three piles going as you sort.',
+          pageNum, totalPages);
+        const c3 = 3, cg = 12;
+        const cW = (gridW - (c3 - 1) * cg) / c3;
+        const catchH = PH - gridTop - BOT;
+        const zones = [
+          ['Final Spot — Unmatched R/M', `${fmtSortCount(lastSpotCount)} cards · rares/mythics that match no defined spot (go to the last buyer)`],
+          ['Bulk — Commons & Uncommons', 'Every common & uncommon, regardless of type'],
+          ['Misfits — Tokens · Art · Basics · Variants', 'Anything that is not a sellable R/M spot card'],
+        ];
+        zones.forEach((z, i) => { const x = M + i * (cW + cg); drawBigZone(doc, x, gridTop, cW, catchH, z[0], z[1]); });
+
+        doc.save(`sort-assistant-${new Date().toISOString().slice(0, 10)}.pdf`);
+        showToast('Sort Assistant PDF downloaded', 'success');
+      } catch (e) {
+        console.error('[SortAssistant]', e);
+        showToast(`PDF error: ${e.message}`, 'error');
+      }
+      hideLoading();
+    }, 50);
+  }
+
+  if (dom.sortAssistantBtn) dom.sortAssistantBtn.addEventListener('click', generateSortAssistantPDF);
+
   dom.rebuildLabelsBtn.addEventListener('click', () => {
     state.starTiers.three = parseInt(dom.tierThree.value) || 10;
     state.starTiers.two = parseInt(dom.tierTwo.value) || 20;
@@ -6530,6 +6845,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       target: '#copy-all-labels-btn',
       title: 'Bulk copy for your overlay',
       body: 'Copy all spot labels at once for paste into OBS, Twitch chat, or your overlay. Each row also has its own 📋 (label) and 📝 (item description, names only — no prices, TOS-safe) buttons.',
+      placement: 'left'
+    },
+    {
+      target: '#download-sort-assistant-btn',
+      title: '🗂️ Sort Assistant — sort the cards after the stream',
+      body: 'When the break is done you\'ve got a giant stack of cards to split among buyers. Click <strong>Sort Assistant</strong> to download a printable landscape PDF: a <strong>coarse-sort master page</strong> to first split the pile into main-type stacks, then <strong>detail pages</strong> with a labelled spot for each pile (3 across × 2 down, the bottom row hangs off the page so stacks have room). Spots are grouped by main type and sorted A–Z, with color-split tribes kept together under their base name (all Human stacks land at "H", then W·U·B·R·G·Multi·Colorless). Each label shows its ⭐ tier and ~expected hit count so they match your overlay, and small non-creature types share sheets to save paper. A final <strong>catch-all page</strong> covers unmatched R/M, bulk commons/uncommons, and misfits.',
       placement: 'left'
     },
     {
