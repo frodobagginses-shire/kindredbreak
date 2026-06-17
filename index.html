@@ -1190,10 +1190,18 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     const releaseDate = new Date(setInfo.released_at);
     const feb2024 = new Date('2024-02-01');
     const setType = setInfo.set_type;
+    const code = String(setInfo.code || '').toLowerCase();
 
     // Commander precons don't have standard boosters
     if (setType === 'commander') {
       return ['Draft Booster'];
+    }
+
+    // Marvel Super Heroes — uses Marvel-specific Play + Collector profiles
+    // until MTGJSON publishes MSH booster sheets. The booster-type names route
+    // through MTGJSON_BOOSTER_KEYS the same way once data lands.
+    if (code === 'msh') {
+      return ['Marvel Play Booster', 'Marvel Collector Booster'];
     }
 
     if (releaseDate >= feb2024) {
@@ -1755,7 +1763,13 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     'Play Booster': 'play',
     'Collector Booster': 'collector',
     'Draft Booster': 'draft',
-    'Set Booster': 'set'
+    'Set Booster': 'set',
+    // Marvel Super Heroes (MSH) ships 2026-06-26. Until MTGJSON publishes
+    // MSH.json with booster sheets, the names below fall through to the
+    // hand-coded fallback in PACK_PROFILES. Once MTGJSON ships, the live model
+    // takes over via these same keys — no other code change required.
+    'Marvel Play Booster': 'play',
+    'Marvel Collector Booster': 'collector'
   };
 
   function pickWeighted(items, totalWeight, weightFn) {
@@ -1971,6 +1985,73 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         { type: 'foil_land', count: 1 }
       ],
       subsetChance: 0.06
+    },
+
+    // ─── Marvel Super Heroes (MSH) ─────────────────────────────────────────
+    // Hand-rolled profiles based on the WPN collecting article. These are a
+    // TEMPORARY FALLBACK so streamers can model MSH break EV before MTGJSON
+    // publishes the official booster sheets. Once MTGJSON ships MSH.json with
+    // `booster.play` and `booster.collector` sheets, distributionForEntry uses
+    // the live model and these profiles never get hit — no removal required.
+    //
+    // Marvel slot weights collapse special card types (scene/logo/panel/source
+    // material/MSC) into approximate rarity buckets. The calculator only cares
+    // about (card, probability, isFoil) for EV math, so the approximation is
+    // fine for the main-set portion. Special card types whose prices aren't yet
+    // on TCGPlayer simply contribute $0 to EV until release pricing emerges.
+    'Marvel Play Booster': {
+      totalCards: 14,
+      slots: [
+        { type: 'common', count: 7 },
+        { type: 'uncommon', count: 3 },
+        // R/M slot — main-set portion is 76.1% R + 16.6% M; the 7.3% special
+        // bucket (scene/logo/panel/source-material/borderless land R/M) is
+        // approximated by rolling into the rare/mythic pool. rare_mythic
+        // handler uses the standard 87.5/12.5 split which is close enough.
+        { type: 'rare_mythic', count: 1 },
+        // Wildcard — 12.4% C, 64% U, 16.8% R, 2.1% M (plus ~4.7% special).
+        { type: 'wildcard', count: 1, weights: { common: 0.124, uncommon: 0.640, rare: 0.168, mythic: 0.021 } },
+        // Traditional foil — 59.9% C, 29.6% U, 5.9% R, 1.2% M.
+        { type: 'guaranteed_foil', count: 1, weights: { common: 0.599, uncommon: 0.296, rare: 0.059, mythic: 0.012 } },
+        // 1 land + 1 helper/token slot collapsed: lands contribute via the
+        // 50%-foil weights baked into existing handlers; the helper/token slot
+        // has no monetary value so we skip it (totalCards still reflects 14).
+        { type: 'land', count: 1 }
+      ],
+      subsetChance: 0
+    },
+
+    'Marvel Collector Booster': {
+      totalCards: 15,
+      slots: [
+        // Foil commons: 3 main + 2 MSC = ~5 foil commons (MSC commons are
+        // jumpstart reprints + new-to-magic; treat as commons for EV).
+        { type: 'foil_common', count: 5 },
+        // Foil uncommons: 2 main + 1 MSC.
+        { type: 'foil_uncommon', count: 3 },
+        // Scene card slot — 20% C, 80% U.
+        { type: 'guaranteed_foil', count: 1, weights: { common: 0.20, uncommon: 0.80, rare: 0, mythic: 0 } },
+        // Foil basic land slot (city calm/city chaos).
+        { type: 'foil_land', count: 1 },
+        // Foil R/M slot — main set + small special bucket; use standard 88/12.
+        { type: 'foil_rare_mythic', count: 1 },
+        // NF Booster Fun from Commander decks — 96.8% extended-art R/M with
+        // most weight on rares (~93.6% R, 3.2% M, 3.2% borderless commander).
+        { type: 'extended_art_rare', count: 1, weights: { rare: 0.940, mythic: 0.060 } },
+        // NF R/M Booster Fun (main + scene/logo/panel/borderless variants).
+        // Roughly 30.1% main R + 7.5% main M + ~30% special R + ~14% special M
+        // + 14% misc; collapse to a single extended_art_rare with similar
+        // distribution.
+        { type: 'extended_art_rare', count: 1, weights: { rare: 0.680, mythic: 0.150 } },
+        // Source material slot (75% non-foil + 25% foil). Source-material cards
+        // include all rarities; treat as a wildcard_premium R/M slot.
+        { type: 'wildcard_premium', count: 1, weights: { rare: 0.800, mythic: 0.200 } },
+        // Foil Booster Fun R/M — 34.5% main R + 6.7% main M + ~30% special
+        // R/M + 16.5% land/comic/etc. Approximate as foil extended-art R/M.
+        { type: 'foil_extended_rare', count: 1, weights: { rare: 0.860, mythic: 0.140 } }
+        // 1 art card / token slot — no monetary value, skipped.
+      ],
+      subsetChance: 0
     }
   };
 
