@@ -87,6 +87,10 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 .data-table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.875rem; }
 .data-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .status-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
+.model-badge { display: inline-block; margin-left: 0.3rem; padding: 0.1rem 0.45rem; border-radius: 10px; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.02em; cursor: help; border: 1px solid var(--border); white-space: nowrap; }
+.model-mtgjson { color: var(--text-secondary); }
+.model-official { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+.model-generic { color: var(--warning); border-color: var(--warning); background: var(--warning-bg); }
 .status-cached { background: var(--success-bg); color: var(--success); }
 .status-loading { background: var(--warning-bg); color: var(--warning); }
 .status-error { background: var(--danger-bg); color: var(--danger); }
@@ -455,7 +459,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
             <p><strong>Exclusion spots</strong> &mdash; carve out narrow buckets: <code>Enchantment excluding creature and legendary</code>, or terser <code>Enchantment !Creature !Legendary</code>.</p>
 
             <h4>Why this tool</h4>
-            <p>Pack composition is a moving target. New sets ship Special Guest slots, bonus sheets, and Collector-only treatments. This calculator uses <strong>MTGJSON's authoritative booster data</strong> &mdash; the actual WotC sheet weights &mdash; so your EV is grounded in reality, not vibes. Secret Lair drops, commander precons, and aftermarket pricing all roll up cleanly.</p>
+            <p>Pack composition is a moving target. New sets ship Special Guest slots, bonus sheets, and Collector-only treatments. This calculator uses <strong>MTGJSON's authoritative booster data</strong> &mdash; the actual WotC sheet weights &mdash; so your EV is grounded in reality, not vibes. Brand-new sets that MTGJSON hasn't covered yet run on Wizards' own published pack odds until it does; each roster row shows which source it's using. Secret Lair drops, commander precons, and aftermarket pricing all roll up cleanly.</p>
 
             <h4>Two modes below</h4>
             <p><strong>Break Builder</strong> is for streamers: enter your cost basis per pack/drop/deck, get your break-even per spot, and generate star-tier spot labels (e.g. <code>⭐⭐⭐Dragon Demonic Tutor Guaranteed Hit ⭐⭐⭐</code>) you can paste straight into your overlay.</p>
@@ -797,7 +801,11 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         <p><strong>Variants</strong>: a set of pack templates with different slot compositions, each with a weight. SOS Play Boosters, for example, have 4 variants with weights 216 / 54 / 4 / 1 out of 275 total.</p>
         <p><strong>Sheets</strong>: weighted card pools that fill each slot &mdash; <code>mysticalArchive</code>, <code>specialGuest</code>, <code>foilUMysticalArchive</code>, etc.</p>
         <p>To open a pack, the simulator picks one variant by weight, then for each (sheet, count) pair in that variant picks the requested number of cards from the sheet's weighted pool. This captures bonus sheet rates, special-guest rates, etched/silverscroll treatments, and any per-set quirks exactly as Wizards specifies.</p>
-        <p>For sets without MTGJSON booster data (typically very old sets or unreleased products), a simplified slot model is used as a fallback.</p>
+        <p>When MTGJSON hasn't published a set's sheets yet (common on release week), the calculator uses the next best source, and the roster row's badge says which one:</p>
+        <p><strong>MTGJSON</strong>: the real sheet-and-variant collation described above.</p>
+        <p><strong>Official odds</strong>: sheets rebuilt from the slot-by-slot odds in Wizards' "Collecting" article for that set (Star Trek, for now). Wizards lists many Booster Fun pools as "less than 1%"; those get small estimated shares of whatever the published numbers leave over. Once MTGJSON publishes the set, it takes over automatically.</p>
+        <p><strong>Estimate</strong>: a generic modern pack profile (7 commons, 3 uncommons, a wildcard, a rare/mythic, a foil and a land for Play Boosters; 5 rares/mythics for Collector Boosters), drawn from the set's main-set cards. Treat these EVs as rough.</p>
+        <p>Fixed sheets (Reality Fracture's echoed pairs, Jumpstart theme decks) always produce the same cards together, and a card won't repeat within a pack unless the sheet allows it.</p>
 
         <h4>Bonus Sheets &amp; Special Treatments</h4>
         <p>Bonus sheets are modeled as their own sheets within the variant model. Per-pack rate is determined by variant weights, not a flat percentage.</p>
@@ -974,55 +982,102 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
    */
 
   const API_BASE = 'https://api.scryfall.com';
-  const RATE_LIMIT_MS = 110; // ~9 req/s to stay safely under 10/s
   const MAX_RETRIES = 3;     // total attempts for transient errors
 
-  let lastRequestTime = 0;
+  // Scryfall's published hard limits (scryfall.com/docs/api/rate-limits):
+  //   /cards/search, /cards/named, /cards/random, /cards/collection → 2/second
+  //   everything else → 10/second
+  // A 429 locks the client out for 30 seconds, and repeated 429s risk a ban,
+  // so every request goes through one serialized gate that spaces calls per
+  // lane and pauses everything after a 429.
+  const FAST_INTERVAL_MS = 110;  // ~9 req/s
+  const SLOW_INTERVAL_MS = 550;  // just under 2 req/s
+  const RATE_LIMIT_PAUSE_MS = 30000;
+  const SLOW_PATHS = ['/cards/search', '/cards/named', '/cards/random', '/cards/collection'];
+
+  let lastRequestTime = 0;       // any request
+  let lastSlowRequestTime = 0;   // slow-lane requests only
+  let blockedUntil = 0;          // set after a 429
+  let gate = Promise.resolve();
 
   /** Sleep helper */
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function isSlowPath(url) {
+    const path = url.startsWith(API_BASE) ? url.slice(API_BASE.length) : url;
+    return SLOW_PATHS.some(p => path.startsWith(p));
+  }
+
+  /** Wait for this request's turn. Calls are serialized so parallel loads can't burst. */
+  function throttle(url) {
+    const slow = isSlowPath(url);
+    const turn = gate.then(async () => {
+      let wait = Math.max(0, blockedUntil - Date.now(), lastRequestTime + FAST_INTERVAL_MS - Date.now());
+      if (slow) wait = Math.max(wait, lastSlowRequestTime + SLOW_INTERVAL_MS - Date.now());
+      if (wait > 0) await sleep(wait);
+      lastRequestTime = Date.now();
+      if (slow) lastSlowRequestTime = lastRequestTime;
+    });
+    gate = turn.catch(() => {});
+    return turn;
+  }
+
+  /** After a 429, pause every Scryfall request (Retry-After if given, else 30s). */
+  function noteRateLimited(res) {
+    const ra = parseFloat(res && res.headers && res.headers.get && res.headers.get('Retry-After'));
+    const pause = Number.isFinite(ra) && ra > 0 ? ra * 1000 : RATE_LIMIT_PAUSE_MS;
+    blockedUntil = Math.max(blockedUntil, Date.now() + pause);
+    try {
+      globalThis.dispatchEvent && globalThis.dispatchEvent(new CustomEvent('scryfall-ratelimit', { detail: { pauseMs: pause } }));
+    } catch (_) { /* non-browser */ }
+    return pause;
+  }
+
+  const JSON_HEADERS = { 'Accept': 'application/json' };
 
   /**
    * Rate-limited fetch wrapper with retry/backoff.
    * Retries up to MAX_RETRIES times on:
    *   - Network-level fetch failures (Safari's "Load failed", Chrome's "Failed to fetch")
-   *   - 429 rate-limit responses
+   *   - 429 rate-limit responses (after Scryfall's 30-second cool-down)
    *   - 5xx server errors
    * Doesn't retry on 4xx (real errors like 404).
    */
   async function rateLimitedFetch(url) {
     let lastError = null;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const now = Date.now();
-      const elapsed = now - lastRequestTime;
-      if (elapsed < RATE_LIMIT_MS) {
-        await sleep(RATE_LIMIT_MS - elapsed);
-      }
-      lastRequestTime = Date.now();
+      await throttle(url);
 
+      let res;
       try {
-        const res = await fetch(url);
-        if (res.ok) return res.json();
-
-        // 4xx (except 429) are real errors — don't retry
-        if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.details || `Scryfall API error: ${res.status}`);
-        }
-
-        // 5xx or 429 → retryable
-        lastError = new Error(`Scryfall API error: ${res.status}`);
-        console.warn(`[Scryfall] ${url.slice(API_BASE.length)} → ${res.status}, attempt ${attempt}/${MAX_RETRIES}`);
+        res = await fetch(url, { headers: JSON_HEADERS });
       } catch (e) {
         // TypeError from network failure (e.g., Safari "Load failed") — retry
         lastError = e;
         console.warn(`[Scryfall] ${url.slice(API_BASE.length)} threw "${e.message}", attempt ${attempt}/${MAX_RETRIES}`);
+        if (attempt < MAX_RETRIES) await sleep(250 * Math.pow(3, attempt - 1));
+        continue;
       }
 
-      // Exponential backoff before next attempt: 250ms, 750ms, 2250ms
-      if (attempt < MAX_RETRIES) {
-        await sleep(250 * Math.pow(3, attempt - 1));
+      if (res.ok) return res.json();
+
+      if (res.status === 429) {
+        lastError = new Error('Scryfall API error: 429');
+        const pause = noteRateLimited(res);
+        console.warn(`[Scryfall] ${url.slice(API_BASE.length)} → 429, pausing ${Math.round(pause / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`);
+        continue; // the next throttle() waits out the pause
       }
+
+      // Other 4xx are real errors (e.g. 404 for a search with no results) — don't retry
+      if (res.status >= 400 && res.status < 500) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(`Scryfall API error ${res.status}${err.details ? `: ${err.details}` : ''}`);
+      }
+
+      // 5xx → retry with exponential backoff: 250ms, 750ms
+      lastError = new Error(`Scryfall API error ${res.status}`);
+      console.warn(`[Scryfall] ${url.slice(API_BASE.length)} → ${res.status}, attempt ${attempt}/${MAX_RETRIES}`);
+      if (attempt < MAX_RETRIES) await sleep(250 * Math.pow(3, attempt - 1));
     }
     throw lastError || new Error('Scryfall fetch failed after retries');
   }
@@ -1214,9 +1269,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     }
 
     // Marvel Super Heroes ships Marvel Jumpstart packs alongside Play/Collector.
-    // Until MTGJSON publishes the jumpstart booster type for MSH, the dropdown
-    // adds it here and the fallback profile in PACK_PROFILES drives EV. When
-    // MTGJSON ships, the same label routes through MTGJSON_BOOSTER_KEYS.
+    // The label routes through MTGJSON_BOOSTER_KEYS to MTGJSON's 'jumpstart'
+    // booster (now published); the PACK_PROFILES entry is only a fallback.
     if (code === 'msh') {
       types.push('Marvel Jumpstart Booster');
     }
@@ -1430,6 +1484,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
 
   /**
+   * Booster type keys MTGJSON publishes for a set (e.g. ['play', 'collector',
+   * 'box-topper']) without resolving any cards. Shares fetchMtgjsonSet's cache.
+   */
+  async function getMtgjsonBoosterKeys(setCode) {
+    const main = await fetchMtgjsonSet(setCode);
+    return main && main.booster ? Object.keys(main.booster) : [];
+  }
+
+  /**
    * Build a fully-resolved booster model for a set: every UUID in every sheet
    * is mapped to its Scryfall card. Returns null if MTGJSON has no booster
    * data for the set.
@@ -1498,7 +1561,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
           entries.push({ card: sf, weight: Number(weight) || 0 });
         }
         const totalWeight = sh.totalWeight || entries.reduce((s, e) => s + e.weight, 0);
-        sheets[sn] = { entries, totalWeight, foil: !!sh.foil };
+        // fixed: always the same cards (echoed pairs, Jumpstart themes).
+        // allowDuplicates: a card may repeat within one pack (MTGJSON default: no).
+        sheets[sn] = {
+          entries, totalWeight, foil: !!sh.foil,
+          fixed: !!sh.fixed, allowDuplicates: !!sh.allowDuplicates
+        };
       }
       const variants = (def.boosters || []).map(b => ({
         weight: Number(b.weight) || 0,
@@ -1691,29 +1759,42 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
    */
   async function fetchScryfallByIds(ids) {
     const result = new Map();
-    for (let i = 0; i < ids.length; i += 75) {
-      const chunk = ids.slice(i, i + 75);
+    // Most sheet cards are already cached from fetchSetCards (the roster loads
+    // the set's cards before its booster model), so only ask /cards/collection
+    // for the rest. That endpoint is limited to 2 requests/second.
+    const known = new Map();
+    for (const cards of cardCache.values()) for (const c of cards) known.set(c.id, c);
+    const missing = [];
+    for (const id of ids) {
+      if (known.has(id)) result.set(id, known.get(id));
+      else missing.push(id);
+    }
+
+    for (let i = 0; i < missing.length; i += 75) {
+      const chunk = missing.slice(i, i + 75);
       const body = { identifiers: chunk.map(id => ({ id })) };
+      const url = `${API_BASE}/cards/collection`;
 
       let success = false;
       for (let attempt = 1; attempt <= MAX_RETRIES && !success; attempt++) {
-        const now = Date.now();
-        const elapsed = now - lastRequestTime;
-        if (elapsed < RATE_LIMIT_MS) await sleep(RATE_LIMIT_MS - elapsed);
-        lastRequestTime = Date.now();
-
+        await throttle(url);
         try {
-          const res = await fetch(`${API_BASE}/cards/collection`, {
+          const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { ...JSON_HEADERS, 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
           });
           if (!res.ok) {
-            if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-              console.warn(`[Scryfall] /cards/collection batch ${i}-${i+chunk.length} failed: ${res.status}`);
+            if (res.status === 429) {
+              const pause = noteRateLimited(res);
+              console.warn(`[Scryfall] /cards/collection batch ${i}-${i + chunk.length} → 429, pausing ${Math.round(pause / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`);
+              continue;
+            }
+            if (res.status >= 400 && res.status < 500) {
+              console.warn(`[Scryfall] /cards/collection batch ${i}-${i + chunk.length} failed: ${res.status}`);
               break; // don't retry 4xx
             }
-            console.warn(`[Scryfall] /cards/collection batch ${i}-${i+chunk.length} status ${res.status}, attempt ${attempt}/${MAX_RETRIES}`);
+            console.warn(`[Scryfall] /cards/collection batch ${i}-${i + chunk.length} status ${res.status}, attempt ${attempt}/${MAX_RETRIES}`);
             if (attempt < MAX_RETRIES) await sleep(250 * Math.pow(3, attempt - 1));
             continue;
           }
@@ -1721,12 +1802,378 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
           for (const card of (data.data || [])) result.set(card.id, card);
           success = true;
         } catch (e) {
-          console.warn(`[Scryfall] /cards/collection batch ${i}-${i+chunk.length} threw "${e.message}", attempt ${attempt}/${MAX_RETRIES}`);
+          console.warn(`[Scryfall] /cards/collection batch ${i}-${i + chunk.length} threw "${e.message}", attempt ${attempt}/${MAX_RETRIES}`);
           if (attempt < MAX_RETRIES) await sleep(250 * Math.pow(3, attempt - 1));
         }
       }
     }
     return result;
+  }
+
+  // ── booster-models.js ──
+  /**
+   * Official-Odds Booster Models
+   *
+   * MTGJSON is the primary source of pack composition, but it usually publishes
+   * booster sheets a few days to a few weeks after a set releases. Breaks happen
+   * on release weekend, so for brand-new sets we build the same sheet model
+   * from the odds Wizards publishes in its "Collecting <set>" article.
+   *
+   * The output of buildOfficialBoosterModel() has exactly the shape that
+   * scryfall.js::fetchMtgjsonBooster() returns:
+   *   { play: { variants, totalWeight, sheets: { name: { entries:[{card,weight,foil?}], totalWeight, foil } } },
+   *     collector: { ... } }
+   * so every EV, simulation, bulk and top-hit code path works unchanged.
+   * Entries may carry their own `foil` flag when one slot mixes finishes
+   * (e.g. Star Trek's Booster Fun slot holds both non-foil and foil Stardates).
+   *
+   * Precedence in app.js: MTGJSON (when it has booster data) > official model
+   * here > generic PACK_PROFILES fallback. Once MTGJSON ships a set's sheets the
+   * entry below stops being used automatically; it's safe to leave it in place.
+   *
+   * ── Spec format ──
+   * pools:   name → { set, cn:[lo,hi], rarity?, lang?, type?, notType? }
+   *          Cards are matched against Scryfall prints by collector number range
+   *          (numeric prefix), plus optional rarity / language / type-line filters.
+   * sheets:  name → { foil, items: [[poolName, pct, opts?], ...] }
+   *          pct is the published chance (in %) that one pick from this sheet is
+   *          a card from that pool. Use 'rest' for the main pool that absorbs
+   *          whatever the listed treatments don't, and null for Wizards' "<1%"
+   *          entries (see estimateUnknown below). For multi-pick slots Wizards
+   *          quotes per-pack chances, so those are divided by the pick count in
+   *          the spec. opts.foil overrides the sheet's finish for that pool.
+   * boosters: name → [{ weight, contents: { sheetName: picks } }, ...]
+   */
+
+
+
+  // Wizards lists many Booster Fun pools as "<1%". We split whatever share of
+  // the sheet the published numbers leave over among those pools, in proportion
+  // to card count, with mythic pools counting half per card (mythics are printed
+  // at roughly half the rate of rares). Each estimate is capped just under 1%.
+  const UNKNOWN_CAP_PCT = 0.95;
+  const UNKNOWN_FLOOR_PCT = 0.05;
+
+  const OFFICIAL_BOOSTER_MODELS = {
+    // ─── Magic: The Gathering | Star Trek (TRK) — releases 2026-11-13 ───
+    // Source: magic.wizards.com/en/news/feature/collecting-star-trek
+    // Scryfall numbering: TRK 1-306 main set (81 C + 10 common Planet duals,
+    // 110 U, 80 R, 25 M), 307-316 full-art holodeck/away team basics,
+    // 317-326 default basics, 332-337 borderless lands, 338-362 scene cards,
+    // 363-391 LCARS frame, 392-401 LCARS shock lands, 402-425 classic
+    // Enterprise, 426-435 Klingon frame, 436-445 Klingon script (foil only),
+    // 446-481 extended art, 482-486 surge away team basics, 487-496 surge LCARS
+    // shocks, 497-525 surge LCARS, 526-549 surge classic Enterprise.
+    // SDS 1-30 Stardates (mythic). TRC 1-4 borderless commanders, 180-191 Scene
+    // Box cards, 202-211 borderless new-to-Magic commander cards, 212-417
+    // extended-art commander cards. Signed headliners (7 cards, <250 copies
+    // each) are left out: their pull rate is far too small to move EV.
+    trk: {
+      label: 'Star Trek',
+      source: "Wizards' Collecting Magic: The Gathering | Star Trek (Oct 2026)",
+      sets: ['trk', 'sds', 'trc'],
+      pools: {
+        mainC:    { set: 'trk', cn: [1, 306], rarity: 'common', notType: 'Land — Planet' },
+        dualC:    { set: 'trk', cn: [1, 306], rarity: 'common', type: 'Land — Planet' },
+        mainU:    { set: 'trk', cn: [1, 306], rarity: 'uncommon' },
+        mainR:    { set: 'trk', cn: [1, 306], rarity: 'rare' },
+        mainM:    { set: 'trk', cn: [1, 306], rarity: 'mythic' },
+        fullArtBasic: { set: 'trk', cn: [307, 316] },
+        defaultBasic: { set: 'trk', cn: [317, 326] },
+        blLandR:  { set: 'trk', cn: [332, 337], rarity: 'rare' },
+        blLandM:  { set: 'trk', cn: [332, 337], rarity: 'mythic' },
+        sceneU:   { set: 'trk', cn: [338, 362], rarity: 'uncommon' },
+        sceneR:   { set: 'trk', cn: [338, 362], rarity: 'rare' },
+        sceneM:   { set: 'trk', cn: [338, 362], rarity: 'mythic' },
+        lcarsU:   { set: 'trk', cn: [363, 391], rarity: 'uncommon' },
+        lcarsR:   { set: 'trk', cn: [363, 391], rarity: 'rare' },
+        lcarsM:   { set: 'trk', cn: [363, 391], rarity: 'mythic' },
+        lcarsShock: { set: 'trk', cn: [392, 401] },
+        ceU:      { set: 'trk', cn: [402, 425], rarity: 'uncommon' },
+        ceR:      { set: 'trk', cn: [402, 425], rarity: 'rare' },
+        ceM:      { set: 'trk', cn: [402, 425], rarity: 'mythic' },
+        klingonC: { set: 'trk', cn: [426, 435], rarity: 'common' },
+        klingonU: { set: 'trk', cn: [426, 435], rarity: 'uncommon' },
+        klingonR: { set: 'trk', cn: [426, 435], rarity: 'rare' },
+        scriptC:  { set: 'trk', cn: [436, 445], rarity: 'common' },
+        scriptU:  { set: 'trk', cn: [436, 445], rarity: 'uncommon' },
+        scriptR:  { set: 'trk', cn: [436, 445], rarity: 'rare' },
+        extR:     { set: 'trk', cn: [446, 481], rarity: 'rare' },
+        extM:     { set: 'trk', cn: [446, 481], rarity: 'mythic' },
+        surgeAwayTeam:   { set: 'trk', cn: [482, 486] },
+        surgeLcarsShock: { set: 'trk', cn: [487, 496] },
+        surgeLcarsU: { set: 'trk', cn: [497, 525], rarity: 'uncommon' },
+        surgeLcarsR: { set: 'trk', cn: [497, 525], rarity: 'rare' },
+        surgeLcarsM: { set: 'trk', cn: [497, 525], rarity: 'mythic' },
+        surgeCeU:    { set: 'trk', cn: [526, 549], rarity: 'uncommon' },
+        surgeCeR:    { set: 'trk', cn: [526, 549], rarity: 'rare' },
+        surgeCeM:    { set: 'trk', cn: [526, 549], rarity: 'mythic' },
+        stardates:   { set: 'sds', cn: [1, 30] },
+        trcBlCommander: { set: 'trc', cn: [1, 4] },
+        trcSceneBox:    { set: 'trc', cn: [180, 191] },
+        trcBlNewR:      { set: 'trc', cn: [202, 211], rarity: 'rare' },
+        trcBlNewM:      { set: 'trc', cn: [202, 211], rarity: 'mythic' },
+        trcExtR:        { set: 'trc', cn: [212, 417], rarity: 'rare' },
+        trcExtM:        { set: 'trc', cn: [212, 417], rarity: 'mythic' }
+      },
+      sheets: {
+        // ── Play Booster ──
+        // 6-7 commons: Klingon frame common shows up in 2.9% of packs (7 picks).
+        common: { foil: false, items: [
+          ['klingonC', 2.9 / 7],
+          ['mainC', 'rest']
+        ] },
+        // 3 uncommons: per-pack chances below, divided across the 3 picks.
+        uncommon: { foil: false, items: [
+          ['sceneU', 7.7 / 3],
+          ['lcarsU', 4.6 / 3],
+          ['ceU', 4.6 / 3],
+          ['klingonU', 5 / 3],
+          ['mainU', 'rest']
+        ] },
+        wildcard: { foil: false, items: [
+          ['mainC', 20.8], ['mainU', 54.1], ['mainR', 16.7], ['mainM', 2.6],
+          ['klingonC', null], ['klingonU', 1], ['klingonR', null],
+          ['sceneU', 1.5], ['sceneR', null], ['sceneM', null],
+          ['lcarsU', 1], ['lcarsR', null], ['lcarsM', null],
+          ['ceR', null], ['ceM', null],
+          ['blLandR', null], ['blLandM', null],
+          ['lcarsShock', null]
+        ] },
+        rareMythic: { foil: false, items: [
+          ['mainR', 80.1], ['mainM', 12.4],
+          ['klingonR', null],
+          ['sceneR', 1], ['sceneM', null],
+          ['lcarsR', 1.8], ['lcarsM', null],
+          ['ceR', 1.5], ['ceM', null],
+          ['blLandR', 1], ['blLandM', null],
+          ['lcarsShock', 1.4]
+        ] },
+        foil: { foil: true, items: [
+          ['mainC', 51.2], ['mainU', 34.7], ['mainR', 6.3], ['mainM', 1],
+          ['klingonC', null], ['klingonU', 1], ['klingonR', null],
+          ['sceneU', 1.6], ['sceneR', null], ['sceneM', null],
+          ['lcarsU', 1.1], ['lcarsR', null], ['lcarsM', null],
+          ['ceR', null], ['ceM', null],
+          ['blLandR', null], ['blLandM', null],
+          ['lcarsShock', null]
+        ] },
+        // Land slot: 50% common dual, 33.3% default basic, 16.7% holodeck/away
+        // team (full-art) basic. 20% of packs have the land in traditional foil.
+        nonFoilLand: { foil: false, items: [
+          ['dualC', 50], ['defaultBasic', 33.3], ['fullArtBasic', 16.7]
+        ] },
+        foilLand: { foil: true, items: [
+          ['dualC', 50], ['defaultBasic', 33.3], ['fullArtBasic', 16.7]
+        ] },
+        // Replaces a common in 1 of 25 Play Boosters.
+        stardatesPlay: { foil: false, items: [['stardates', 100]] },
+
+        // ── Collector Booster ──
+        cbFoilCommon: { foil: true, items: [['mainC', 89], ['dualC', 11]] },
+        cbFoilUncommon: { foil: true, items: [['mainU', 100]] },
+        cbFoilCUBoosterFun: { foil: true, items: [
+          ['klingonC', 2.7], ['klingonU', 16.1],
+          ['scriptC', 1.4], ['scriptU', 8.1],
+          ['sceneU', 26.9],
+          ['lcarsU', 18.9], ['ceU', 13.5],
+          ['surgeLcarsU', 7.3], ['surgeCeU', 5.2]
+        ] },
+        cbFoilLand: { foil: true, items: [
+          ['fullArtBasic', 66.7], ['surgeAwayTeam', 33.3]
+        ] },
+        cbFoilRareMythic: { foil: true, items: [['mainR', 86.5], ['mainM', 13.5]] },
+        cbCommanderBoosterFun: { foil: false, items: [
+          ['trcExtR', 93.1], ['trcExtM', 2.1],
+          ['trcBlCommander', 1],
+          ['trcBlNewR', 2.8], ['trcBlNewM', 1]
+        ] },
+        cbBoosterFun: { foil: false, items: [
+          ['klingonR', 1.9],
+          ['sceneR', 4.2], ['sceneM', 1.7],
+          ['trcSceneBox', 4.6],
+          ['lcarsR', 10.4], ['lcarsM', 2.3],
+          ['lcarsShock', 7.7],
+          ['blLandR', 3.5], ['blLandM', null],
+          ['ceR', 8.5], ['ceM', 2.1],
+          ['extR', 21.5], ['extM', 3.1],
+          ['stardates', 23.1],
+          ['stardates', 5, { foil: true }]
+        ] },
+        // Wizards' published lines for this slot add up to 96%; the sheet is
+        // renormalized, so each listed pool is scaled up proportionally.
+        cbFoilBoosterFun: { foil: true, items: [
+          ['klingonR', 2.2], ['scriptR', 2.7],
+          ['sceneR', 4.9], ['sceneM', 2],
+          ['lcarsR', 12], ['lcarsM', 2.7],
+          ['lcarsShock', 8.9],
+          ['surgeLcarsR', 3.2], ['surgeLcarsM', 1],
+          ['surgeLcarsShock', 4.6],
+          ['ceR', 9.8], ['ceM', 2.4],
+          ['surgeCeR', 3], ['surgeCeM', 1],
+          ['extR', 24.9], ['extM', 3.6],
+          ['trcBlNewR', 5.3], ['trcBlNewM', 1.8]
+        ] }
+      },
+      boosters: {
+        play: [
+          // 24/25 packs: 7 commons. 1/25: 6 commons + a Stardates card.
+          // 4/5 packs: non-foil land. 1/5: traditional foil land.
+          { weight: 96, contents: { common: 7, uncommon: 3, wildcard: 1, rareMythic: 1, foil: 1, nonFoilLand: 1 } },
+          { weight: 24, contents: { common: 7, uncommon: 3, wildcard: 1, rareMythic: 1, foil: 1, foilLand: 1 } },
+          { weight: 4,  contents: { common: 6, stardatesPlay: 1, uncommon: 3, wildcard: 1, rareMythic: 1, foil: 1, nonFoilLand: 1 } },
+          { weight: 1,  contents: { common: 6, stardatesPlay: 1, uncommon: 3, wildcard: 1, rareMythic: 1, foil: 1, foilLand: 1 } }
+        ],
+        collector: [
+          { weight: 1, contents: {
+            cbFoilCommon: 5, cbFoilUncommon: 3, cbFoilCUBoosterFun: 1, cbFoilLand: 1,
+            cbFoilRareMythic: 1, cbCommanderBoosterFun: 1, cbBoosterFun: 2, cbFoilBoosterFun: 1
+          } }
+        ]
+      }
+    }
+  };
+
+  /** True when a hand-built official model exists for this set code. */
+  function hasOfficialBoosterModel(setCode) {
+    return !!OFFICIAL_BOOSTER_MODELS[String(setCode || '').toLowerCase()];
+  }
+
+  function collectorNumberValue(card) {
+    const m = String(card.collector_number || '').match(/^(\d+)/);
+    return m ? parseInt(m[1], 10) : NaN;
+  }
+
+  function cardInPool(card, pool) {
+    const n = collectorNumberValue(card);
+    if (!(n >= pool.cn[0] && n <= pool.cn[1])) return false;
+    if (pool.rarity && card.rarity !== pool.rarity) return false;
+    if (pool.lang && card.lang !== pool.lang) return false;
+    const tl = card.type_line || '';
+    if (pool.type && !tl.includes(pool.type)) return false;
+    if (pool.notType && tl.includes(pool.notType)) return false;
+    return true;
+  }
+
+  function rarityFactorForPool(cards) {
+    if (!cards.length) return 1;
+    return cards[0].rarity === 'mythic' ? 0.5 : 1;
+  }
+
+  /**
+   * Turn one sheet spec into concrete percentages per pool, filling 'rest' and
+   * estimating null ("<1%") items. Pools that resolve to zero cards are dropped
+   * and the sheet is renormalized, so a missing Scryfall range can't silently
+   * inflate the others' share beyond their published odds by much.
+   */
+  function resolveSheetPercents(items, poolCards) {
+    const rows = items.map(([pool, pct, opts]) => ({
+      pool, pct, opts: opts || {}, cards: poolCards[pool] || []
+    })).filter(r => r.cards.length > 0);
+
+    const known = rows.filter(r => typeof r.pct === 'number');
+    const knownSum = known.reduce((s, r) => s + r.pct, 0);
+    const rest = rows.filter(r => r.pct === 'rest');
+    const unknown = rows.filter(r => r.pct === null);
+
+    if (rest.length) {
+      const share = Math.max(0, 100 - knownSum) / rest.length;
+      for (const r of rest) r.pct = share;
+      // Unknown items in a sheet with a 'rest' pool get the floor estimate.
+      for (const r of unknown) r.pct = UNKNOWN_FLOOR_PCT;
+    } else if (unknown.length) {
+      const remainder = Math.max(0, 100 - knownSum);
+      const units = unknown.map(r => r.cards.length * rarityFactorForPool(r.cards));
+      const totalUnits = units.reduce((s, u) => s + u, 0) || 1;
+      unknown.forEach((r, i) => {
+        const est = remainder * units[i] / totalUnits;
+        r.pct = Math.min(UNKNOWN_CAP_PCT, Math.max(UNKNOWN_FLOOR_PCT, est));
+        r.estimated = true;
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * Build a sheet model for `setCode` from OFFICIAL_BOOSTER_MODELS, resolving
+   * pools against Scryfall card data. Resolves to null when no spec exists or
+   * when the main set returned no cards. Cached per set for the session.
+   */
+  const officialModelCache = new Map(); // code → Promise<model|null>
+
+  function buildOfficialBoosterModel(setCode) {
+    const code = String(setCode || '').toLowerCase();
+    if (!OFFICIAL_BOOSTER_MODELS[code]) return Promise.resolve(null);
+    if (!officialModelCache.has(code)) {
+      const p = resolveOfficialModel(code).then(m => {
+        if (!m) officialModelCache.delete(code); // let a later add retry
+        return m;
+      }, e => { officialModelCache.delete(code); throw e; });
+      officialModelCache.set(code, p);
+    }
+    return officialModelCache.get(code);
+  }
+
+  async function resolveOfficialModel(code) {
+    const spec = OFFICIAL_BOOSTER_MODELS[code];
+
+    const cardsBySet = {};
+    for (const s of spec.sets) {
+      try {
+        cardsBySet[s] = await fetchSetCards(s);
+      } catch (e) {
+        console.warn(`[OfficialModel] ${code}: could not load ${s}:`, e.message);
+        cardsBySet[s] = [];
+      }
+    }
+    if (!(cardsBySet[code] || []).length) return null;
+
+    const poolCards = {};
+    for (const [name, pool] of Object.entries(spec.pools)) {
+      const list = (cardsBySet[pool.set] || []).filter(c => cardInPool(c, pool));
+      // Same print can appear once per search page boundary; dedupe by id.
+      const seen = new Set();
+      poolCards[name] = list.filter(c => (seen.has(c.id) ? false : (seen.add(c.id), true)));
+      if (!poolCards[name].length) console.warn(`[OfficialModel] ${code}: pool ${name} matched 0 cards`);
+    }
+
+    const sheets = {};
+    for (const [sheetName, sheetSpec] of Object.entries(spec.sheets)) {
+      const rows = resolveSheetPercents(sheetSpec.items, poolCards);
+      const entries = [];
+      for (const r of rows) {
+        const perCard = r.pct / r.cards.length;
+        const foil = r.opts.foil;
+        for (const card of r.cards) {
+          const e = { card, weight: perCard };
+          if (typeof foil === 'boolean' && foil !== !!sheetSpec.foil) e.foil = foil;
+          entries.push(e);
+        }
+      }
+      const totalWeight = entries.reduce((s, e) => s + e.weight, 0);
+      sheets[sheetName] = { entries, totalWeight, foil: !!sheetSpec.foil };
+    }
+
+    const model = {};
+    for (const [key, variants] of Object.entries(spec.boosters)) {
+      const usedSheets = {};
+      for (const v of variants) {
+        for (const sn of Object.keys(v.contents)) usedSheets[sn] = sheets[sn];
+      }
+      model[key] = {
+        variants: variants.map(v => ({ weight: v.weight, contents: { ...v.contents } })),
+        totalWeight: variants.reduce((s, v) => s + v.weight, 0),
+        sheets: usedSheets
+      };
+    }
+    console.log(`[OfficialModel] Built ${spec.label} model from published odds: ${Object.keys(model).join(', ')}`);
+    return model;
+  }
+
+  /** Short description of where a set's official model came from (for tooltips). */
+  function officialModelSource(setCode) {
+    const spec = OFFICIAL_BOOSTER_MODELS[String(setCode || '').toLowerCase()];
+    return spec ? spec.source : null;
   }
 
   // ── collation.js ──
@@ -1744,7 +2191,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   /**
    * Top-level product dispatcher used by simulation.js::simulateBreak.
    * Routes entries by productType:
-   *   'booster'           → MTGJSON sheet model if entry.mtgjsonBooster, else simplified simulatePack()
+   *   'booster'           → entry.mtgjsonBooster sheet model (MTGJSON, official odds or
+   *                         generic profile — see entry.modelSource), else generic simulatePack()
    *   'secret_lair'       → simulateSecretLairDrop()
    *   'commander_precon'  → simulateCommanderPrecon()
    */
@@ -1760,15 +2208,18 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
   }
 
   // MTGJSON uses lower-case keys; map our user-facing pack-type names.
+  // Official-odds models (booster-models.js) use the same keys.
   const MTGJSON_BOOSTER_KEYS = {
     'Play Booster': 'play',
     'Collector Booster': 'collector',
     'Draft Booster': 'draft',
     'Set Booster': 'set',
-    // Marvel Jumpstart bridge — MSH ships Marvel Jumpstart packs but MTGJSON
-    // hasn't published the jumpstart booster type for MSH yet. The fallback
-    // profile below approximates a 20-card themed Jumpstart pack; once MTGJSON
-    // adds 'jumpstart' to MSH.json, this same key routes to live data.
+    // One per sealed box (e.g. The Hobbit's foil Middle-earth classic artist
+    // card). Only offered in the pack dropdown when the set's model has it.
+    'Box Topper': 'box-topper',
+    // Marvel Super Heroes Jumpstart packs. MTGJSON now publishes MSH's
+    // 'jumpstart' booster (51 fixed 20-card themes), which this key routes to.
+    // The fallback profile below only runs if that data is unavailable.
     'Marvel Jumpstart Booster': 'jumpstart'
   };
 
@@ -1785,10 +2236,61 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return items[items.length - 1];
   }
 
+  /** Finish of one sheet entry: entries may override their sheet's finish. */
+  function entryIsFoil(entry, sheet) {
+    return typeof entry.foil === 'boolean' ? entry.foil : !!sheet.foil;
+  }
+
   /**
-   * Simulate a pack using MTGJSON's authoritative booster definition.
-   * Picks one variant by weight, then for each (sheet, count) pair in the
-   * variant, picks `count` cards from the sheet weighted by card weight.
+   * Draw `count` entries from a sheet, following MTGJSON's sheet semantics:
+   *   - fixed sheets (echoed pairs, Jumpstart theme decks) always yield the same
+   *     cards, each repeated `weight` times;
+   *   - otherwise cards are drawn by weight, without repeating a card within one
+   *     pack unless the sheet sets allowDuplicates (MTGJSON's default is no
+   *     duplicates, which is how real collation works).
+   */
+  function drawFromSheet(sheet, count) {
+    const entries = sheet.entries || [];
+    if (!entries.length || count <= 0) return [];
+    if (sheet.fixed) {
+      const out = [];
+      for (const e of entries) {
+        const copies = Math.max(1, Math.round(e.weight));
+        for (let i = 0; i < copies && out.length < count; i++) out.push(e);
+      }
+      return out;
+    }
+    const withReplacement = sheet.allowDuplicates || count > entries.length;
+    if (withReplacement) {
+      const tw = entries.reduce((s, e) => s + e.weight, 0);
+      const out = [];
+      for (let i = 0; i < count; i++) {
+        const e = pickWeighted(entries, tw, en => en.weight);
+        if (e) out.push(e);
+      }
+      return out;
+    }
+    const pool = entries.slice();
+    let tw = pool.reduce((s, e) => s + e.weight, 0);
+    const out = [];
+    for (let i = 0; i < count && pool.length; i++) {
+      let r = Math.random() * tw;
+      let idx = pool.length - 1;
+      for (let j = 0; j < pool.length; j++) {
+        if (r < pool[j].weight) { idx = j; break; }
+        r -= pool[j].weight;
+      }
+      const [e] = pool.splice(idx, 1);
+      tw -= e.weight;
+      out.push(e);
+    }
+    return out;
+  }
+
+  /**
+   * Simulate a pack using a sheet-based booster model (MTGJSON's authoritative
+   * definition, or an official-odds model with the same shape). Picks one
+   * variant by weight, then draws each (sheet, count) pair in the variant.
    *
    * Returns the same shape as simulatePack:
    *   [{ card, isFoil, slotType, price }, ...]
@@ -1807,10 +2309,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     for (const [sheetName, count] of Object.entries(variant.contents || {})) {
       const sheet = def.sheets[sheetName];
       if (!sheet || !sheet.entries.length) continue;
-      const isFoil = !!sheet.foil;
-      for (let i = 0; i < count; i++) {
-        const e = pickWeighted(sheet.entries, sheet.totalWeight, en => en.weight);
+      for (const e of drawFromSheet(sheet, count)) {
         if (!e || !e.card) continue;
+        const isFoil = entryIsFoil(e, sheet);
         out.push({
           card: e.card,
           isFoil,
@@ -1822,70 +2323,85 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return out;
   }
 
-  /**
-   * Compute the probability-weighted distribution of every R/M card that can
-   * appear in a pack of the given booster type, using MTGJSON's sheet model.
-   * Returns [{ card, probability, isFoil }, ...].
-   *
-   * For each card C of rarity R/M:
-   *   P(card C appears at least once in a pack of this type) ≈
-   *   Σ over variants v: P(v) × Σ over sheets s in v.contents:
-   *     (count_s in v) × (weight(C in s) / totalWeight(s))
-   *
-   * (We use the linear-additive expectation, which equals true P for at-most-
-   *  one-copy slots and slightly overestimates when a sheet appears multiple
-   *  times — fine for EV summation since EV is the expected count × price.)
-   */
-  /**
-   * Like getRareMythicDistributionFromMtgjson but returns ALL cards regardless
-   * of rarity. Used to compute total expected pack value including Bulk (C/U).
-   */
-  function getAllCardDistributionFromMtgjson(mtgjsonBooster, boosterType) {
+  /** True when the model can produce packs of this type. */
+  function boosterModelHasType(mtgjsonBooster, boosterType) {
     const key = MTGJSON_BOOSTER_KEYS[boosterType];
-    if (!key) return null;
-    const def = mtgjsonBooster[key];
-    if (!def || !def.variants || def.variants.length === 0) return null;
-
-    const dist = [];
-    for (const variant of def.variants) {
-      const pVar = variant.weight / (def.totalWeight || 1);
-      if (pVar <= 0) continue;
-      for (const [sheetName, count] of Object.entries(variant.contents || {})) {
-        const sheet = def.sheets[sheetName];
-        if (!sheet || !sheet.totalWeight) continue;
-        const isFoil = !!sheet.foil;
-        for (const entry of sheet.entries) {
-          const probability = pVar * count * (entry.weight / sheet.totalWeight);
-          dist.push({ card: entry.card, probability, isFoil });
-        }
-      }
-    }
-    return dist;
+    const def = key && mtgjsonBooster ? mtgjsonBooster[key] : null;
+    return !!(def && def.variants && def.variants.length);
   }
 
-  function getRareMythicDistributionFromMtgjson(mtgjsonBooster, boosterType) {
-    const key = MTGJSON_BOOSTER_KEYS[boosterType];
-    if (!key) return null;
-    const def = mtgjsonBooster[key];
-    if (!def || !def.variants || def.variants.length === 0) return null;
+  /**
+   * Expected-count distribution of every card a pack of this type can contain.
+   * Returns [{ card, probability, isFoil }, ...], one row per (print, finish).
+   *
+   *   E[copies of card C] = Σ over sheets s: E[picks from s] × weight(C in s) / totalWeight(s)
+   *   E[picks from s]     = Σ over variants v: P(v) × count_s(v)
+   *
+   * Aggregating per sheet first (instead of per variant) gives the identical
+   * result but stays fast for sets like Reality Fracture, whose Play Booster has
+   * 232 variants. `probability` is an expected count (it equals the chance of
+   * at least one copy for single-pick slots), which is what EV sums need.
+   *
+   * Results are cached per model object; models never change after loading.
+   */
+  const distributionCache = new WeakMap(); // def → { all, rm }
 
-    const dist = [];
-    for (const variant of def.variants) {
-      const pVar = variant.weight / (def.totalWeight || 1);
+  function computeDistribution(def) {
+    const picks = new Map();
+    const tw = def.totalWeight || def.variants.reduce((s, v) => s + v.weight, 0) || 1;
+    for (const v of def.variants) {
+      const pVar = v.weight / tw;
       if (pVar <= 0) continue;
-      for (const [sheetName, count] of Object.entries(variant.contents || {})) {
-        const sheet = def.sheets[sheetName];
-        if (!sheet || !sheet.totalWeight) continue;
-        const isFoil = !!sheet.foil;
-        for (const entry of sheet.entries) {
-          const r = entry.card.rarity;
-          if (r !== 'rare' && r !== 'mythic') continue;
-          const probability = pVar * count * (entry.weight / sheet.totalWeight);
-          dist.push({ card: entry.card, probability, isFoil });
-        }
+      for (const [sn, count] of Object.entries(v.contents || {})) {
+        picks.set(sn, (picks.get(sn) || 0) + pVar * count);
       }
     }
-    return dist;
+    const merged = new Map();
+    for (const [sn, expectedPicks] of picks) {
+      const sheet = def.sheets[sn];
+      if (!sheet || !sheet.totalWeight || !sheet.entries) continue;
+      for (const e of sheet.entries) {
+        if (!e.card) continue;
+        const isFoil = entryIsFoil(e, sheet);
+        const probability = expectedPicks * (e.weight / sheet.totalWeight);
+        if (!(probability > 0)) continue;
+        const k = `${e.card.id || `${e.card.set}|${e.card.collector_number}|${e.card.name}`}|${isFoil ? 'f' : 'n'}`;
+        const row = merged.get(k);
+        if (row) row.probability += probability;
+        else merged.set(k, { card: e.card, probability, isFoil });
+      }
+    }
+    const all = [...merged.values()];
+    const rm = all.filter(d => d.card.rarity === 'rare' || d.card.rarity === 'mythic');
+    return { all, rm };
+  }
+
+  function distributionFor(mtgjsonBooster, boosterType) {
+    const key = MTGJSON_BOOSTER_KEYS[boosterType];
+    if (!key || !mtgjsonBooster) return null;
+    const def = mtgjsonBooster[key];
+    if (!def || !def.variants || def.variants.length === 0) return null;
+    let cached = distributionCache.get(def);
+    if (!cached) {
+      cached = computeDistribution(def);
+      distributionCache.set(def, cached);
+    }
+    return cached;
+  }
+
+  /**
+   * All cards regardless of rarity. Used to compute total expected pack value
+   * including Bulk (C/U). Treat the returned array as read-only (it's cached).
+   */
+  function getAllCardDistributionFromMtgjson(mtgjsonBooster, boosterType) {
+    const d = distributionFor(mtgjsonBooster, boosterType);
+    return d ? d.all : null;
+  }
+
+  /** Rare and mythic cards only. Treat the returned array as read-only (it's cached). */
+  function getRareMythicDistributionFromMtgjson(mtgjsonBooster, boosterType) {
+    const d = distributionFor(mtgjsonBooster, boosterType);
+    return d ? d.rm : null;
   }
 
   /**
@@ -1927,84 +2443,98 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     });
   }
 
-  // ─── Pack Profile Definitions ───
-  // Each profile defines the slots in a booster pack.
-  // Slot types: common, uncommon, rare_mythic, wildcard, foil, guaranteed_foil
-  // rare_mythic: 7/8 chance rare, 1/8 chance mythic (standard distribution)
+  // ─── Generic fallback profiles ───
+  //
+  // Used only when a set has neither MTGJSON booster sheets nor an official-odds
+  // model in booster-models.js (typically a brand-new set in the days before
+  // MTGJSON catches up). Each profile is turned into the same sheet model the
+  // MTGJSON path uses (see buildGenericBoosterModel), so simulation, R/M EV and
+  // Bulk EV all go through one code path.
+  //
+  // Slot kinds:
+  //   common, uncommon            main-set C / U
+  //   rareMythic                  main-set R/M at 7:1
+  //   wildcard                    main-set card of any rarity, by `weights`
+  //   foilWildcard                same, traditional foil
+  //   land, foilLand              basic land (falls back to a common)
+  //   foilCommon, foilUncommon, foilRareMythic
+  //   boosterFun, foilBoosterFun  R/M Booster Fun print (borderless, showcase,
+  //                               extended art...), falls back to main-set R/M
+  //
+  // Rates are calibrated to 2026 Play/Collector Boosters (The Hobbit, Reality
+  // Fracture, Marvel Super Heroes, Star Trek): about 1.28 R/M per Play Booster
+  // and exactly 5 R/M per Collector Booster.
 
   const PACK_PROFILES = {
     'Play Booster': {
       totalCards: 14,
       slots: [
-        { type: 'common', count: 6 },
-        { type: 'uncommon', count: 3 },
-        { type: 'rare_mythic', count: 1 },
-        { type: 'wildcard', count: 2, weights: { common: 0.60, uncommon: 0.25, rare: 0.10, mythic: 0.05 } },
-        { type: 'guaranteed_foil', count: 1, weights: { common: 0.40, uncommon: 0.35, rare: 0.17, mythic: 0.08 } },
-        { type: 'land', count: 1 }
+        { kind: 'common', count: 7 },
+        { kind: 'uncommon', count: 3 },
+        { kind: 'wildcard', count: 1, weights: { common: 0.45, uncommon: 0.355, rare: 0.17, mythic: 0.025 } },
+        { kind: 'rareMythic', count: 1 },
+        { kind: 'foilWildcard', count: 1, weights: { common: 0.56, uncommon: 0.36, rare: 0.07, mythic: 0.01 } },
+        { kind: 'land', count: 1 }
       ],
-      subsetChance: 0.03 // ~3% chance for Special Guest in wildcard slot
+      // A bonus-sheet card (Special Guests etc.) replaces one common in ~2% of packs.
+      subset: { chance: 0.02, replaces: 'common', foil: false }
     },
 
     'Draft Booster': {
       totalCards: 15,
       slots: [
-        { type: 'common', count: 10 },
-        { type: 'uncommon', count: 3 },
-        { type: 'rare_mythic', count: 1 },
-        { type: 'land', count: 1 }
-      ],
-      subsetChance: 0
+        { kind: 'common', count: 10 },
+        { kind: 'uncommon', count: 3 },
+        { kind: 'rareMythic', count: 1 },
+        { kind: 'land', count: 1 }
+      ]
     },
 
     'Set Booster': {
       totalCards: 12,
       slots: [
-        { type: 'common', count: 3 },
-        { type: 'uncommon', count: 3 },
-        { type: 'rare_mythic', count: 1 },
-        { type: 'wildcard', count: 2, weights: { common: 0.40, uncommon: 0.30, rare: 0.20, mythic: 0.10 } },
-        { type: 'guaranteed_foil', count: 1, weights: { common: 0.30, uncommon: 0.35, rare: 0.24, mythic: 0.11 } },
-        { type: 'art', count: 1 },
-        { type: 'land', count: 1 }
+        { kind: 'common', count: 3 },
+        { kind: 'uncommon', count: 3 },
+        { kind: 'rareMythic', count: 1 },
+        { kind: 'wildcard', count: 2, weights: { common: 0.40, uncommon: 0.30, rare: 0.25, mythic: 0.05 } },
+        { kind: 'foilWildcard', count: 1, weights: { common: 0.45, uncommon: 0.35, rare: 0.17, mythic: 0.03 } },
+        { kind: 'land', count: 1 }
       ],
-      subsetChance: 0.04
+      subset: { chance: 0.04, replaces: 'common', foil: false }
     },
 
     'Collector Booster': {
       totalCards: 15,
       slots: [
-        { type: 'foil_common', count: 4 },
-        { type: 'foil_uncommon', count: 2 },
-        { type: 'foil_rare_mythic', count: 1 },
-        { type: 'rare_mythic', count: 2 },
-        { type: 'extended_art_rare', count: 1 },
-        { type: 'foil_extended_rare', count: 1 },
-        { type: 'wildcard_premium', count: 2, weights: { rare: 0.60, mythic: 0.40 } },
-        { type: 'guaranteed_foil', count: 1, weights: { rare: 0.55, mythic: 0.45 } },
-        { type: 'foil_land', count: 1 }
+        { kind: 'foilCommon', count: 5 },
+        { kind: 'foilUncommon', count: 4 },
+        { kind: 'foilLand', count: 1 },
+        { kind: 'foilRareMythic', count: 2 },
+        { kind: 'boosterFun', count: 2, weights: { rare: 0.8, mythic: 0.2 } },
+        { kind: 'foilBoosterFun', count: 1, weights: { rare: 0.8, mythic: 0.2 } }
       ],
-      subsetChance: 0.06
+      subset: { chance: 0.05, replaces: 'foilCommon', foil: true }
     },
 
-    // ─── Marvel Jumpstart Booster (MSH-specific) ───────────────────────────
-    // Temporary fallback profile for Marvel Super Heroes Jumpstart packs.
-    // MTGJSON has MSH play + collector booster sheets but not jumpstart yet;
-    // when they publish it, distributionForEntry uses the live model and this
-    // profile is never hit (label 'Marvel Jumpstart Booster' routes through
-    // MTGJSON_BOOSTER_KEYS to MTGJSON's 'jumpstart' key automatically).
-    //
-    // Modern Jumpstart packs are 20-card themed mini-decks: 1 R/M + ~4 U +
-    // ~15 C. Each pack picks one theme deterministically from N themes, but
-    // without the actual deck list we model the rarity distribution only.
+    // One foil Booster Fun card per sealed box. Only offered when a set's real
+    // model has a box topper; this profile just keeps card counts sensible.
+    'Box Topper': {
+      totalCards: 1,
+      slots: [
+        { kind: 'foilBoosterFun', count: 1, weights: { rare: 0.5, mythic: 0.5 } }
+      ]
+    },
+
+    // Marvel Super Heroes Jumpstart: 20-card themed packs, about 1 R/M + 4 U +
+    // 15 C. MTGJSON now publishes the real theme lists (routed via
+    // MTGJSON_BOOSTER_KEYS), so this only runs if that data can't be loaded.
     'Marvel Jumpstart Booster': {
       totalCards: 20,
       slots: [
-        { type: 'common', count: 15 },
-        { type: 'uncommon', count: 4 },
-        { type: 'rare_mythic', count: 1 }
-      ],
-      subsetChance: 0
+        { kind: 'common', count: 15 },
+        { kind: 'uncommon', count: 4 },
+        { kind: 'rareMythic', count: 1 }
+      ]
     }
   };
 
@@ -2024,236 +2554,190 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return profile.slots.reduce((sum, s) => sum + s.count, 0);
   }
 
-  /**
-   * Filter cards by rarity from a card pool. Defensive against null/undefined
-   * inputs (entries may still be mid-load when callers iterate the roster).
-   */
+  // Scryfall markers for prints that aren't the plain main-set version.
+  const BOOSTER_FUN_FRAME_EFFECTS = new Set([
+    'showcase', 'extendedart', 'inverted', 'etched', 'shatteredglass', 'fullart'
+  ]);
+  const NON_MAIN_PROMO_TYPES = new Set([
+    'boosterfun', 'surgefoil', 'galaxyfoil', 'textured', 'halofoil', 'serialized',
+    'confettifoil', 'raisedfoil', 'fracturefoil', 'gilded', 'stepandcompleat',
+    'oilslick', 'neonink', 'headliner', 'boxtopper', 'bundle', 'poster',
+    'gleaminggold', 'doublerainbow', 'rainbowfoil', 'silverfoil', 'ripplefoil',
+    'dragonscalefoil', 'singularityfoil', 'cosmicfoil', 'manafoil', 'invisibleink',
+    'embossed', 'prerelease', 'promopack', 'buyabox', 'setpromo', 'datestamped',
+    'beginnerbox', 'starterdeck', 'playpromo', 'release', 'draftweekend'
+  ]);
+
+  // Never drawn by the generic profile: serialized and headliner chase cards,
+  // box toppers, bundle/prerelease/promo-pack exclusives. Their odds are tiny
+  // or zero, so spreading a Booster Fun slot evenly over them would let one
+  // $1,000 card dominate the estimate.
+  const OUT_OF_PACK_PROMO_TYPES = new Set([
+    'serialized', 'headliner', 'gleaminggold', 'doublerainbow', 'boxtopper',
+    'bundle', 'prerelease', 'promopack', 'buyabox', 'setpromo', 'datestamped',
+    'beginnerbox', 'starterdeck', 'playpromo', 'release', 'draftweekend'
+  ]);
+
+  function isOutOfPackPrint(card) {
+    return !!card.promo || (card.promo_types || []).some(t => OUT_OF_PACK_PROMO_TYPES.has(t));
+  }
+
+  function isBasicLand(card) {
+    return /\bBasic\b/.test(card.type_line || '') && /\bLand\b/.test(card.type_line || '');
+  }
+
+  /** True for alternate prints: borderless, showcase, extended art, surge foil, non-English... */
+  function isBoosterFunPrint(card) {
+    if (!card) return false;
+    if (card.lang && card.lang !== 'en') return true;
+    if (card.promo) return true;
+    if (card.border_color === 'borderless') return true;
+    if ((card.frame_effects || []).some(f => BOOSTER_FUN_FRAME_EFFECTS.has(f))) return true;
+    if ((card.promo_types || []).some(t => NON_MAIN_PROMO_TYPES.has(t))) return true;
+    if (card.full_art && !isBasicLand(card)) return true;
+    return false;
+  }
+
   function cardsByRarity(cards, rarity) {
     if (!cards || !Array.isArray(cards)) return [];
     return cards.filter(c => c && c.rarity === rarity);
   }
 
-  /**
-   * Pick a random card from an array.
-   */
-  function randomPick(arr) {
-    if (!arr.length) return null;
-    return arr[Math.floor(Math.random() * arr.length)];
+  function genericPools(setCards, subsetCards) {
+    const all = (setCards || []).filter(Boolean);
+    const main = all.filter(c => !isBoosterFunPrint(c));
+    const basics = main.filter(isBasicLand);
+    const mainNonBasic = main.filter(c => !isBasicLand(c));
+    const fun = all.filter(c => isBoosterFunPrint(c) && !isOutOfPackPrint(c));
+    const sub = (subsetCards || []).filter(c => c && (c.rarity === 'rare' || c.rarity === 'mythic'));
+    return {
+      common: cardsByRarity(mainNonBasic, 'common'),
+      uncommon: cardsByRarity(mainNonBasic, 'uncommon'),
+      rare: cardsByRarity(mainNonBasic, 'rare'),
+      mythic: cardsByRarity(mainNonBasic, 'mythic'),
+      funRare: cardsByRarity(fun, 'rare'),
+      funMythic: cardsByRarity(fun, 'mythic'),
+      basics,
+      subset: sub
+    };
   }
 
-  /**
-   * Pick a rarity based on weighted probabilities.
-   */
-  function pickWeightedRarity(weights) {
-    const roll = Math.random();
-    let cumulative = 0;
-    for (const [rarity, weight] of Object.entries(weights)) {
-      cumulative += weight;
-      if (roll <= cumulative) return rarity;
+  function spread(cards, share) {
+    if (!cards.length || !(share > 0)) return [];
+    const w = share / cards.length;
+    return cards.map(card => ({ card, weight: w }));
+  }
+
+  function rareMythicEntries(rares, mythics, rareShare = 0.875) {
+    if (!rares.length) return spread(mythics, 1);
+    if (!mythics.length) return spread(rares, 1);
+    return [...spread(rares, rareShare), ...spread(mythics, 1 - rareShare)];
+  }
+
+  function genericSheetEntries(kind, weights, pools) {
+    switch (kind) {
+      case 'common':
+      case 'foilCommon':
+        return spread(pools.common, 1);
+      case 'uncommon':
+      case 'foilUncommon':
+        return spread(pools.uncommon, 1);
+      case 'rareMythic':
+      case 'foilRareMythic':
+        return rareMythicEntries(pools.rare, pools.mythic);
+      case 'wildcard':
+      case 'foilWildcard': {
+        const out = [];
+        for (const [rarity, share] of Object.entries(weights || {})) out.push(...spread(pools[rarity] || [], share));
+        return out;
+      }
+      case 'land':
+      case 'foilLand':
+        return spread(pools.basics.length ? pools.basics : pools.common, 1);
+      case 'boosterFun':
+      case 'foilBoosterFun': {
+        const rShare = (weights && weights.rare) || 0.8;
+        const r = pools.funRare.length ? pools.funRare : pools.rare;
+        const m = pools.funMythic.length ? pools.funMythic : pools.mythic;
+        return rareMythicEntries(r, m, rShare);
+      }
+      case 'subset':
+        return spread(pools.subset, 1);
+      default:
+        return [];
     }
-    return Object.keys(weights).pop(); // fallback
+  }
+
+  const FOIL_KINDS = new Set(['foilWildcard', 'foilLand', 'foilCommon', 'foilUncommon', 'foilRareMythic', 'foilBoosterFun']);
+
+  const genericModelCache = new WeakMap(); // setCards array → Map(cacheKey → model)
+
+  /**
+   * Build a sheet model ({ [key]: { variants, totalWeight, sheets } }) for one
+   * booster type from the generic profile and a set's Scryfall cards.
+   * Returns null when the type has no profile or the set has no cards.
+   */
+  function buildGenericBoosterModel(boosterType, setCards, subsetCards = []) {
+    const profile = PACK_PROFILES[boosterType];
+    const key = MTGJSON_BOOSTER_KEYS[boosterType];
+    if (!profile || !key || !Array.isArray(setCards) || !setCards.length) return null;
+
+    const cacheKey = `${boosterType}|${(subsetCards || []).length}`;
+    let perSet = genericModelCache.get(setCards);
+    if (perSet && perSet.has(cacheKey)) return perSet.get(cacheKey);
+
+    const pools = genericPools(setCards, subsetCards);
+    const sheets = {};
+    const contents = {};
+    profile.slots.forEach((slot, i) => {
+      const name = `${slot.kind}${i}`;
+      const entries = genericSheetEntries(slot.kind, slot.weights, pools);
+      if (!entries.length) return;
+      sheets[name] = {
+        entries,
+        totalWeight: entries.reduce((s, e) => s + e.weight, 0),
+        foil: FOIL_KINDS.has(slot.kind)
+      };
+      contents[name] = slot.count;
+    });
+
+    const variants = [];
+    const sub = profile.subset;
+    if (sub && pools.subset.length && sub.chance > 0) {
+      const replacedIdx = profile.slots.findIndex(sl => sl.kind === sub.replaces);
+      const replacedName = replacedIdx >= 0 ? `${sub.replaces}${replacedIdx}` : null;
+      if (replacedName && contents[replacedName]) {
+        const subEntries = spread(pools.subset, 1);
+        sheets.subset = { entries: subEntries, totalWeight: 1, foil: !!sub.foil };
+        const withSubset = { ...contents, [replacedName]: contents[replacedName] - 1, subset: 1 };
+        variants.push({ weight: 1 - sub.chance, contents: { ...contents } });
+        variants.push({ weight: sub.chance, contents: withSubset });
+      }
+    }
+    if (!variants.length) variants.push({ weight: 1, contents: { ...contents } });
+
+    const model = { [key]: { variants, totalWeight: variants.reduce((s, v) => s + v.weight, 0), sheets } };
+    if (!perSet) { perSet = new Map(); genericModelCache.set(setCards, perSet); }
+    perSet.set(cacheKey, model);
+    return model;
   }
 
   /**
-   * Simulate opening a single pack.
-   * Returns an array of { card, isFoil, slotType } objects.
-   *
-   * @param {string} boosterType - The pack type
-   * @param {Object[]} setCards - All cards in the set
-   * @param {Object[]} subsetCards - Cards from subsets (e.g., SPG)
-   * @returns {{ card: Object, isFoil: boolean, slotType: string, price: number }[]}
+   * Simulate opening a single pack with the generic profile.
+   * Returns an array of { card, isFoil, slotType, price } objects.
    */
   function simulatePack(boosterType, setCards, subsetCards = []) {
-    const profile = getPackProfile(boosterType);
-    if (!profile) return [];
-
-    const commons = cardsByRarity(setCards, 'common');
-    const uncommons = cardsByRarity(setCards, 'uncommon');
-    const rares = cardsByRarity(setCards, 'rare');
-    const mythics = cardsByRarity(setCards, 'mythic');
-
-    const results = [];
-
-    for (const slot of profile.slots) {
-      for (let i = 0; i < slot.count; i++) {
-        let card = null;
-        let isFoil = false;
-
-        // Check for subset card injection
-        if (subsetCards.length > 0 && Math.random() < (profile.subsetChance || 0)) {
-          const subRares = cardsByRarity(subsetCards, 'rare');
-          const subMythics = cardsByRarity(subsetCards, 'mythic');
-          const subPool = [...subRares, ...subMythics];
-          if (subPool.length) {
-            card = randomPick(subPool);
-            isFoil = slot.type.includes('foil');
-          }
-        }
-
-        if (!card) {
-          switch (slot.type) {
-            case 'common':
-              card = randomPick(commons);
-              break;
-
-            case 'uncommon':
-              card = randomPick(uncommons);
-              break;
-
-            case 'rare_mythic':
-              // Standard 7:1 rare-to-mythic ratio
-              card = Math.random() < 0.875
-                ? randomPick(rares)
-                : randomPick(mythics);
-              break;
-
-            case 'wildcard': {
-              const rarity = pickWeightedRarity(slot.weights);
-              const pool = rarity === 'mythic' ? mythics
-                : rarity === 'rare' ? rares
-                : rarity === 'uncommon' ? uncommons
-                : commons;
-              card = randomPick(pool);
-              break;
-            }
-
-            case 'guaranteed_foil': {
-              isFoil = true;
-              const rarity = pickWeightedRarity(slot.weights);
-              const pool = rarity === 'mythic' ? mythics
-                : rarity === 'rare' ? rares
-                : rarity === 'uncommon' ? uncommons
-                : commons;
-              card = randomPick(pool);
-              break;
-            }
-
-            case 'foil_common':
-              isFoil = true;
-              card = randomPick(commons);
-              break;
-
-            case 'foil_uncommon':
-              isFoil = true;
-              card = randomPick(uncommons);
-              break;
-
-            case 'foil_rare_mythic':
-              isFoil = true;
-              card = Math.random() < 0.875
-                ? randomPick(rares)
-                : randomPick(mythics);
-              break;
-
-            case 'extended_art_rare':
-            case 'foil_extended_rare':
-              isFoil = slot.type.includes('foil');
-              card = Math.random() < 0.8
-                ? randomPick(rares)
-                : randomPick(mythics);
-              break;
-
-            case 'wildcard_premium': {
-              const r = pickWeightedRarity(slot.weights);
-              const p = r === 'mythic' ? mythics : rares;
-              card = randomPick(p);
-              isFoil = true;
-              break;
-            }
-
-            case 'land':
-            case 'foil_land':
-              // Lands are low value; we'll create a placeholder
-              card = randomPick(commons) || { name: 'Basic Land', rarity: 'common', type_line: 'Basic Land', prices: {} };
-              isFoil = slot.type === 'foil_land';
-              break;
-
-            case 'art':
-              // Art cards have no market value
-              card = { name: 'Art Card', rarity: 'common', type_line: 'Art Card', prices: {} };
-              break;
-
-            default:
-              card = randomPick(commons);
-          }
-        }
-
-        if (card) {
-          const price = getCardPrice(card, isFoil);
-          results.push({ card, isFoil, slotType: slot.type, price });
-        }
-      }
-    }
-
-    return results;
+    const model = buildGenericBoosterModel(boosterType, setCards, subsetCards);
+    return (model && simulatePackFromMtgjson(model, boosterType)) || [];
   }
 
   /**
-   * Get all possible rare/mythic cards and their weighted appearance chance
-   * for a given booster type. Used for EV calculation.
+   * Expected R/M cards per pack for the generic profile, as
+   * [{ card, probability, isFoil }, ...]. Used for EV calculation.
    */
   function getRareMythicDistribution(boosterType, setCards, subsetCards = []) {
-    const profile = getPackProfile(boosterType);
-    if (!profile) return [];
-
-    const rares = cardsByRarity(setCards, 'rare');
-    const mythics = cardsByRarity(setCards, 'mythic');
-    const subRares = cardsByRarity(subsetCards, 'rare');
-    const subMythics = cardsByRarity(subsetCards, 'mythic');
-
-    // Build probability-weighted list of cards that can appear in R/M slots
-    const distribution = [];
-
-    // For each slot that can produce R/M
-    for (const slot of profile.slots) {
-      let rareMythicWeight = 0;
-      let rareWeight = 0;
-      let mythicWeight = 0;
-
-      switch (slot.type) {
-        case 'rare_mythic':
-        case 'foil_rare_mythic':
-          rareWeight = 0.875;
-          mythicWeight = 0.125;
-          rareMythicWeight = 1;
-          break;
-
-        case 'wildcard':
-        case 'guaranteed_foil':
-          rareWeight = slot.weights.rare || 0;
-          mythicWeight = slot.weights.mythic || 0;
-          rareMythicWeight = rareWeight + mythicWeight;
-          break;
-
-        case 'wildcard_premium':
-        case 'extended_art_rare':
-        case 'foil_extended_rare':
-          rareWeight = slot.weights ? (slot.weights.rare || 0.8) : 0.8;
-          mythicWeight = slot.weights ? (slot.weights.mythic || 0.2) : 0.2;
-          rareMythicWeight = 1;
-          break;
-
-        default:
-          continue;
-      }
-
-      if (rareMythicWeight === 0) continue;
-      const isFoil = slot.type.includes('foil');
-
-      for (let i = 0; i < slot.count; i++) {
-        // Each rare has equal chance within the rare pool
-        for (const card of rares) {
-          const prob = rareWeight / rares.length;
-          distribution.push({ card, probability: prob, isFoil });
-        }
-        for (const card of mythics) {
-          const prob = mythicWeight / mythics.length;
-          distribution.push({ card, probability: prob, isFoil });
-        }
-      }
-    }
-
-    return distribution;
+    const model = buildGenericBoosterModel(boosterType, setCards, subsetCards);
+    return (model && getRareMythicDistributionFromMtgjson(model, boosterType)) || [];
   }
 
   // ── simulation.js ──
@@ -2493,6 +2977,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
   // ─── Distribution function selection ───
 
+  /**
+   * R/M distribution for one booster roster entry: [{ card, probability, isFoil }].
+   * entry.mtgjsonBooster holds the entry's sheet model (MTGJSON, official odds
+   * or generic profile). If the model lacks the requested pack type, fall back
+   * to the generic profile built from the set's Scryfall cards.
+   */
   function distributionForEntry(entry) {
     if (entry.mtgjsonBooster) {
       const d = getRareMythicDistributionFromMtgjson(entry.mtgjsonBooster, entry.boosterType);
@@ -2502,6 +2992,17 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     // empty rather than crashing. Callers `.continue` on empty distributions.
     if (!entry.cards || !Array.isArray(entry.cards)) return [];
     return getRareMythicDistribution(entry.boosterType, entry.cards, entry.subsetCards || []);
+  }
+
+  /** Like distributionForEntry but every rarity (for Bulk EV). */
+  function allCardDistributionForEntry(entry) {
+    if (entry.mtgjsonBooster) {
+      const d = getAllCardDistributionFromMtgjson(entry.mtgjsonBooster, entry.boosterType);
+      if (d && d.length) return d;
+    }
+    if (!entry.cards || !Array.isArray(entry.cards)) return [];
+    const generic = buildGenericBoosterModel(entry.boosterType, entry.cards, entry.subsetCards || []);
+    return (generic && getAllCardDistributionFromMtgjson(generic, entry.boosterType)) || [];
   }
 
   // ─── Sorting cards into spots (priority order) ───
@@ -2569,9 +3070,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
   /**
    * Expected Bulk (C/U) value across the roster. Returns total dollar value
-   * of commons + uncommons that will be opened. For boosters with MTGJSON
-   * data, this is exact; for sets without, returns 0 (we don't model the
-   * fallback profile's C/U pricing).
+   * of commons + uncommons that will be opened. Exact for MTGJSON sheet
+   * models, close for official-odds models, and a rough estimate for sets on
+   * the generic profile.
    */
   function calculateBulkEV(rosterEntries) {
     let bulkEV = 0;
@@ -2592,10 +3093,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         }
         continue;
       }
-      // Boosters — need ALL rarities to find C/U; use the new helper.
-      if (!entry.mtgjsonBooster) continue;
-      const allDist = getAllCardDistributionFromMtgjson(entry.mtgjsonBooster, entry.boosterType);
-      if (!allDist) continue;
+      // Boosters — need ALL rarities to find C/U.
+      const allDist = allCardDistributionForEntry(entry);
+      if (!allDist || !allDist.length) continue;
       const q = entry.quantity || 1;
       for (const { card, probability, isFoil } of allDist) {
         if (card.rarity !== 'common' && card.rarity !== 'uncommon') continue;
@@ -3554,6 +4054,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
 
 
+
+
   // ─── State ───
   const state = {
     roster: [],
@@ -3852,6 +4354,26 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     }
     dom.rosterPack.disabled = false;
     dom.addRosterBtn.disabled = false;
+    offerExtraPackTypes(setData.code);
+  }
+
+  /**
+   * Some sets have extra sealed contents in their booster model (e.g. The
+   * Hobbit's box topper). Check the set's MTGJSON model in the background and
+   * append those pack types to the dropdown if the same set is still selected.
+   */
+  async function offerExtraPackTypes(code) {
+    try {
+      const keys = await getMtgjsonBoosterKeys(code);
+      if (!state.selectedSet || state.selectedSet.code !== code) return;
+      if (keys.includes('box-topper')
+          && ![...dom.rosterPack.options].some(o => o.value === 'Box Topper')) {
+        const opt = document.createElement('option');
+        opt.value = 'Box Topper';
+        opt.textContent = 'Box Topper (1 per sealed box)';
+        dom.rosterPack.appendChild(opt);
+      }
+    } catch (_) { /* optional extra; ignore */ }
   }
 
   dom.rosterSet.addEventListener('focus', () => {
@@ -4275,21 +4797,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         }
       }
 
-      // Try to load the authoritative MTGJSON booster model. This gives us
-      // accurate sheet-weighted variant simulation including bonus sheets,
-      // special guests, silverscroll/etched treatments, etc. Falls back to
-      // the simplified profile in collation.js when MTGJSON has no data.
-      try {
-        const booster = await fetchMtgjsonBooster(code);
-        if (booster) {
-          entry.mtgjsonBooster = booster;
-          console.log(`[Roster] ${name}: using MTGJSON booster model`);
-        } else {
-          console.log(`[Roster] ${name}: no MTGJSON booster data — using simplified model`);
-        }
-      } catch (e) {
-        console.warn(`[Roster] MTGJSON booster fetch failed for ${code}:`, e.message);
-      }
+      // Pick the pack model, best source first:
+      //   1. MTGJSON booster sheets — the real WotC collation, incl. bonus
+      //      sheets, special guests and every Booster Fun treatment.
+      //   2. Official-odds model (booster-models.js) — built from Wizards'
+      //      published "Collecting" article for sets MTGJSON hasn't covered yet.
+      //   3. Generic profile (collation.js) — a calibrated estimate.
+      // entry.mtgjsonBooster holds whichever sheet model won; entry.modelSource
+      // records which one, for the roster badge.
+      await assignBoosterModel(entry);
 
       entry.status = 'cached';
       const poolLabel = (boosterType === 'Marvel Jumpstart Booster' && code.toLowerCase() === 'msh')
@@ -4304,6 +4820,67 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     renderRoster();
     updateRosterSummary();
     updateButtonStates();
+  }
+
+  // Scryfall asks clients to back off for 30s after a 429; tell the user why
+  // loading paused instead of letting it look frozen.
+  let lastRateLimitToast = 0;
+  globalThis.addEventListener && globalThis.addEventListener('scryfall-ratelimit', (e) => {
+    if (Date.now() - lastRateLimitToast < 20000) return;
+    lastRateLimitToast = Date.now();
+    const secs = Math.round(((e && e.detail && e.detail.pauseMs) || 30000) / 1000);
+    showToast(`Scryfall asked us to slow down. Loading resumes in about ${secs}s.`, 'info');
+  });
+
+  async function assignBoosterModel(entry) {
+    const { setCode: code, setName: name, boosterType } = entry;
+    try {
+      const booster = await fetchMtgjsonBooster(code);
+      if (booster && boosterModelHasType(booster, boosterType)) {
+        entry.mtgjsonBooster = booster;
+        entry.modelSource = 'mtgjson';
+        console.log(`[Roster] ${name} ${boosterType}: using MTGJSON booster model`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`[Roster] MTGJSON booster fetch failed for ${code}:`, e.message);
+    }
+    if (hasOfficialBoosterModel(code)) {
+      try {
+        const official = await buildOfficialBoosterModel(code);
+        if (official && boosterModelHasType(official, boosterType)) {
+          entry.mtgjsonBooster = official;
+          entry.modelSource = 'official';
+          console.log(`[Roster] ${name} ${boosterType}: no MTGJSON sheets yet — using official published odds`);
+          return;
+        }
+      } catch (e) {
+        console.warn(`[Roster] Official-odds model failed for ${code}:`, e.message);
+      }
+    }
+    const generic = buildGenericBoosterModel(boosterType, entry.cards, entry.subsetCards || []);
+    if (generic) {
+      entry.mtgjsonBooster = generic;
+      entry.modelSource = 'generic';
+      console.log(`[Roster] ${name} ${boosterType}: no published sheets — using generic estimate`);
+    }
+  }
+
+  const MODEL_SOURCE_BADGES = {
+    mtgjson:  { label: 'MTGJSON', cls: 'model-mtgjson',  tip: 'Pack odds from MTGJSON booster sheets (the actual WotC collation).' },
+    official: { label: 'Official odds', cls: 'model-official', tip: "Pack odds from Wizards' published Collecting article. Switches to MTGJSON sheets automatically once they're published." },
+    generic:  { label: 'Estimate', cls: 'model-generic', tip: 'No published pack sheets for this set yet. EV uses a generic modern pack profile and is a rough estimate.' }
+  };
+
+  function modelBadgeHtml(entry) {
+    const b = MODEL_SOURCE_BADGES[entry.modelSource];
+    if (!b) return '';
+    let tip = b.tip;
+    if (entry.modelSource === 'official') {
+      const src = officialModelSource(entry.setCode);
+      if (src) tip = `Pack odds from ${src}. Switches to MTGJSON sheets automatically once they're published.`;
+    }
+    return ` <span class="model-badge ${b.cls}" title="${escHtml(tip)}">${b.label}</span>`;
   }
 
   function resetBoosterInputs() {
@@ -4431,6 +5008,9 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       'stx': ['sta', 'c21'], 'khm': ['khc'], 'znr': ['znc'], 'iko': ['c20'],
       'thb': [], 'eld': [], 'inn': ['imc'], 'tdc': ['spg'], 'fdm': ['spg'],
       'tdm': ['tdc', 'spg'], 'fdc': [],
+      // 2025-2026 sets: only bonus sheets that appear in Play Boosters.
+      'trk': ['sds'], 'fra': ['spg'], 'hob': [], 'msh': [], 'spm': ['mar'],
+      'tla': [], 'tmt': [], 'ecl': [], 'eoe': ['spg'], 'fin': [],
     };
     return subsets[setCode.toLowerCase()] || [];
   }
@@ -4473,6 +5053,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
           ? `✓ ${entry.cards?.length || 0} cards`
           : entry.status === 'loading' ? 'Fetching...' : 'Error';
       }
+      const modelBadge = entry.productType === 'booster' && entry.status === 'cached' ? modelBadgeHtml(entry) : '';
 
       const builderMode = state.viewMode === 'builder';
       const cost = entry.costPerUnit || 0;
@@ -4488,7 +5069,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         <td>${typeLabel}</td>
         <td>${packLabel}</td>
         ${costCells}
-        <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+        <td><span class="status-badge ${statusClass}">${statusText}</span>${modelBadge}</td>
         <td><button class="btn btn-sm btn-danger remove-btn" data-id="${entry.id}">✕</button></td>
       `;
       tr.querySelector('.remove-btn').addEventListener('click', () => removeRosterEntry(entry.id));
@@ -5762,30 +6343,12 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
    * Returns [{ card, ev, isFoil }, ...].
    */
   function analyzeSpotDistributionForEntry(entry) {
-    const out = [];
     const q = entry.quantity || 1;
-    if (entry.mtgjsonBooster) {
-      // Replicate getRareMythicDistributionFromMtgjson logic so we don't need the import.
-      const key = { 'Play Booster':'play', 'Collector Booster':'collector', 'Draft Booster':'draft', 'Set Booster':'set' }[entry.boosterType];
-      if (!key || !entry.mtgjsonBooster[key]) return out;
-      const def = entry.mtgjsonBooster[key];
-      for (const variant of def.variants) {
-        const pVar = variant.weight / (def.totalWeight || 1);
-        for (const [sn, count] of Object.entries(variant.contents || {})) {
-          const sheet = def.sheets[sn];
-          if (!sheet || !sheet.totalWeight) continue;
-          const isFoil = !!sheet.foil;
-          for (const e of sheet.entries) {
-            const r = e.card.rarity;
-            if (r !== 'rare' && r !== 'mythic') continue;
-            const probPerPack = pVar * count * (e.weight / sheet.totalWeight);
-            const price = getCardPrice(e.card, isFoil ? 'foil' : 'nonfoil');
-            out.push({ card: e.card, ev: probPerPack * q * price, isFoil });
-          }
-        }
-      }
-    }
-    return out;
+    return distributionForEntry(entry).map(({ card, probability, isFoil }) => ({
+      card,
+      ev: probability * q * getCardPrice(card, isFoil ? 'foil' : 'nonfoil'),
+      isFoil
+    }));
   }
 
   /**
@@ -6538,10 +7101,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         const sheets = {};
         for (const [sn, sh] of Object.entries(def.sheets || {})) {
           sheets[sn] = {
-            entries: (sh.entries || []).map(e => ({ card: cardById(e.id), weight: e.w }))
-                                         .filter(e => e.card),
+            entries: (sh.entries || []).map(e => {
+                       const out = { card: cardById(e.id), weight: e.w };
+                       if (typeof e.f === 'boolean') out.foil = e.f;
+                       return out;
+                     }).filter(e => e.card),
             totalWeight: sh.totalWeight,
-            foil: !!sh.foil
+            foil: !!sh.foil,
+            fixed: !!sh.fixed,
+            allowDuplicates: !!sh.allowDuplicates
           };
         }
         out[key] = { variants: def.variants || [], totalWeight: def.totalWeight, sheets };
@@ -6569,6 +7137,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         cards: resolveCards(b.cardIds),
         subsetCards: resolveCards(b.subsetCardIds),
         mtgjsonBooster: hydrateBoosterModel(b.mtgjsonBooster),
+        modelSource: b.mtgjsonBooster ? 'mtgjson' : undefined,
         status: 'cached',
         costPerUnit: b.costPerUnit
       });
