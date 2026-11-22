@@ -44,7 +44,7 @@ Each roster row shows a badge for its pack model:
 - **Official odds**: sheets rebuilt from Wizards' "Collecting <set>" article, for sets MTGJSON hasn't covered yet. Specs live in `js/booster-models.js`; the site switches to MTGJSON automatically once it publishes the set, after which the spec can be deleted.
 - **Estimate**: a generic modern pack profile (`PACK_PROFILES` in `js/collation.js`) drawn from the set's main-set cards.
 
-To add a set before MTGJSON has it, copy the `trk` entry in `js/booster-models.js`: define pools by Scryfall collector-number range, then list each slot's published percentages (`'rest'` for the main pool, `null` for Wizards' "less than 1%" lines).
+To add a set before MTGJSON has it, add an entry to `OFFICIAL_BOOSTER_MODELS` in `js/booster-models.js`: define pools by Scryfall collector-number range, then list each slot's published percentages (`'rest'` for the main pool, `null` for Wizards' "less than 1%" lines). The retired Star Trek (`trk`) entry is the worked example to copy (Play and Collector Booster, a bonus sheet, Commander Booster Fun, a mixed-finish slot); view it with `git show d06bd4b:js/booster-models.js`.
 
 ## API etiquette
 
