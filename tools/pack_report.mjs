@@ -9,6 +9,8 @@
  * Calls Scryfall and MTGJSON through the site's rate limiter. Node needs a
  * descriptive User-Agent for Scryfall, which the shim below adds.
  */
+import { readFileSync } from 'node:fs';
+
 const realFetch = globalThis.fetch;
 globalThis.fetch = (url, opts = {}) => realFetch(url, {
   ...opts,
@@ -19,7 +21,14 @@ globalThis.fetch = (url, opts = {}) => realFetch(url, {
   }
 });
 
-const { fetchSetCards, fetchMtgjsonBooster, getMtgjsonBoosterKeys, getCardPrice } = await import('../js/scryfall.js');
+// The site fetches this lookup relative to the page, which Node can't do.
+globalThis.__MTGJSON_EXTERNAL_IDS__ = JSON.parse(
+  readFileSync(new URL('../js/mtgjson-external-ids.json', import.meta.url), 'utf8'));
+
+const {
+  fetchSetCards, fetchMtgjsonBooster, getMtgjsonBoosterKeys, getCardPrice,
+  getUnresolvedBoosterCards, getSetInfo, getAvailableBoosterTypes
+} = await import('../js/scryfall.js');
 const { buildOfficialBoosterModel, hasOfficialBoosterModel } = await import('../js/booster-models.js');
 const {
   MTGJSON_BOOSTER_KEYS, boosterModelHasType, buildGenericBoosterModel,
@@ -54,16 +63,21 @@ for (const code of codes) {
   const mtgjson = keys.length ? await fetchMtgjsonBooster(code) : null;
   const official = hasOfficialBoosterModel(code) ? await buildOfficialBoosterModel(code) : null;
   quietLog(`\n${code.toUpperCase()}: ${cards.length} Scryfall cards; MTGJSON booster keys: ${keys.join(', ') || 'none'}; official-odds spec: ${hasOfficialBoosterModel(code) ? 'yes' : 'no'}`);
+  const unresolved = mtgjson ? getUnresolvedBoosterCards(code) : {};
+  const info = await getSetInfo(code);
+  const offered = info ? getAvailableBoosterTypes(info) : ['Play Booster', 'Collector Booster'];
   for (const type of TYPES) {
     let model = null, source = null;
     if (mtgjson && boosterModelHasType(mtgjson, type)) { model = mtgjson; source = 'MTGJSON'; }
     else if (official && boosterModelHasType(official, type)) { model = official; source = 'Official odds'; }
-    else if (type === 'Play Booster' || type === 'Collector Booster') {
+    else if ((type === 'Play Booster' || type === 'Collector Booster') && offered.includes(type)) {
       model = buildGenericBoosterModel(type, cards, []); source = 'Estimate';
     }
     if (!model) continue;
     const s = summarize(model, type);
     quietLog(`  ${type.padEnd(26)} ${source.padEnd(13)} cards/pack ${s.cards.toFixed(2).padStart(5)}  R/M ${s.rm.toFixed(3)}  R/M EV $${s.rmEV.toFixed(2)}  bulk EV $${s.bulkEV.toFixed(2)}`);
+    const missing = source === 'MTGJSON' ? unresolved[MTGJSON_BOOSTER_KEYS[type]] : 0;
+    if (missing) quietLog(`  ${''.padEnd(26)} WARNING: ${missing} sheet cards have no Scryfall match and never appear (see tools/update_external_ids.py)`);
     if (source === 'MTGJSON' && official && boosterModelHasType(official, type)) {
       const o = summarize(official, type);
       quietLog(`  ${''.padEnd(26)} (official-odds spec for comparison: R/M ${o.rm.toFixed(3)}, R/M EV $${o.rmEV.toFixed(2)})`);

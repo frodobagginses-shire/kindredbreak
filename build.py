@@ -4,8 +4,9 @@ Kindred Break Calculator build script.
 
 Bundles the modules in MODULES (plus the inlined SLD lookup and demo preload
 JSON) into one script, splices it into index.html, and writes js/app.bundle.js.
-If a docs/ folder exists (the local GitHub Pages copy), index.html is copied
-there too. In the GitHub repo, js/app.bundle.js and docs/ are git-ignored.
+If a docs/ folder exists (the local GitHub Pages copy), index.html and
+js/mtgjson-external-ids.json are copied there too. In the GitHub repo,
+js/app.bundle.js and docs/ are git-ignored.
 
 Usage:
     python3 build.py            # build
@@ -101,6 +102,10 @@ def main():
     if has_docs:
         write('docs/index.html', html)
         built.append('docs/index.html')
+        # Fetched at runtime rather than inlined (only Mystery Booster sets use it).
+        os.makedirs(os.path.join(ROOT, 'docs', 'js'), exist_ok=True)
+        write('docs/js/mtgjson-external-ids.json', read('js/mtgjson-external-ids.json'))
+        built.append('docs/js/mtgjson-external-ids.json')
     print(f'Built {", ".join(built)} ({len(bundle):,}-char bundle)')
 
 

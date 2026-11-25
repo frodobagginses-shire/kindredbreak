@@ -16,7 +16,9 @@ import {
   fetchMtgjsonBooster, getMtgjsonBoosterKeys
 } from './scryfall.js';
 
-import { getPackCardCount, boosterModelHasType, buildGenericBoosterModel } from './collation.js';
+import {
+  getPackCardCount, boosterModelHasType, buildGenericBoosterModel, expectedCardsPerPack
+} from './collation.js';
 
 import { buildOfficialBoosterModel, hasOfficialBoosterModel, officialModelSource } from './booster-models.js';
 
@@ -993,6 +995,16 @@ function removeRosterEntry(id) {
   updateButtonStates();
 }
 
+/**
+ * Cards in one pack of a booster roster entry: from its MTGJSON or
+ * official-odds sheets once loaded, else the generic profile's pack size.
+ */
+function packCardCount(entry) {
+  const useModel = entry.mtgjsonBooster && entry.modelSource !== 'generic';
+  const n = useModel ? expectedCardsPerPack(entry.mtgjsonBooster, entry.boosterType) : null;
+  return n ? Math.round(n) : getPackCardCount(entry.boosterType);
+}
+
 function renderRoster() {
   dom.rosterTbody.innerHTML = '';
   dom.rosterEmpty.classList.toggle('hidden', state.roster.length > 0);
@@ -1018,7 +1030,7 @@ function renderRoster() {
       typeLabel = `${escHtml(entry.setName)} <span style="color:var(--text-muted)">(${escHtml(entry.setCode)})</span>`;
       packLabel = entry.boosterType;
       cardsLabel = entry.status === 'cached'
-        ? entry.quantity * getPackCardCount(entry.boosterType)
+        ? entry.quantity * packCardCount(entry)
         : '—';
       statusText = entry.status === 'cached'
         ? `✓ ${entry.cards?.length || 0} cards`
@@ -1073,7 +1085,7 @@ function updateRosterSummary() {
     if (r.status !== 'cached') return sum;
     if (r.productType === 'secret_lair') return sum + r.quantity * r.dropCards.length;
     if (r.productType === 'commander_precon') return sum + r.quantity * r.deckCards.length;
-    return sum + r.quantity * getPackCardCount(r.boosterType);
+    return sum + r.quantity * packCardCount(r);
   }, 0);
   dom.totalPacks.textContent = `Total Products: ${totalUnits}`;
   dom.totalCardsEst.textContent = `Est. Cards: ${totalCards}`;

@@ -260,6 +260,10 @@ export function getCardPrice(card, isFoil = false) {
   return parseFloat(p.usd) || 0;
 }
 
+// Mystery Booster 2 and Mystery Booster Commander Edition. (Scryfall has no
+// set for the original Mystery Booster, so it can't be picked here.)
+const MYSTERY_BOOSTER_SETS = new Set(['mb2', 'mbc']);
+
 /**
  * Determine which booster types exist for a given set.
  * Based on set release date and type.
@@ -273,6 +277,13 @@ export function getAvailableBoosterTypes(setInfo) {
 
   // Commander precons don't have standard boosters
   if (setType === 'commander') {
+    return ['Draft Booster'];
+  }
+
+  // Mystery Booster sets come in one pack, which MTGJSON publishes as 'draft'.
+  // Most of its cards are reprints MTGJSON files under other sets; see
+  // js/mtgjson-external-ids.json.
+  if (MYSTERY_BOOSTER_SETS.has(code)) {
     return ['Draft Booster'];
   }
 
@@ -463,6 +474,41 @@ function deriveDropNameFromUri(sourceUri) {
 
 const mtgjsonSetCache = new Map();   // upperCode → mtgjson data, or null on miss
 const mtgjsonBoosterCache = new Map(); // upperCode → resolved booster model
+const mtgjsonUnresolved = new Map();   // upperCode → { boosterKey: sheet entries with no Scryfall match }
+
+// Some sets' sheets list printings that live outside their own MTGJSON file:
+// Mystery Booster packs pull reprints from The List (PLST, a very large set
+// file) and Mystery Booster 2. js/mtgjson-external-ids.json (built by
+// tools/update_external_ids.py) maps those card UUIDs straight to Scryfall
+// IDs: { "MBC": { mtgjsonUuid: scryfallId, ... }, ... }. It is only fetched
+// when a set's sheets reference cards outside its own MTGJSON file.
+let externalIdLookup = null;
+
+async function loadExternalIdLookup() {
+  if (!externalIdLookup) {
+    externalIdLookup = (async () => {
+      if (globalThis.__MTGJSON_EXTERNAL_IDS__) return globalThis.__MTGJSON_EXTERNAL_IDS__;
+      try {
+        const res = await fetch('./js/mtgjson-external-ids.json');
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        return await res.json();
+      } catch (e) {
+        console.warn('[MTGJSON] Could not load mtgjson-external-ids.json:', e.message);
+        return {};
+      }
+    })();
+  }
+  return externalIdLookup;
+}
+
+/**
+ * Sheet entries per MTGJSON booster key (e.g. { collector: 12 }) that couldn't
+ * be matched to a Scryfall card when the set's model was built. Those cards
+ * never appear in that pack type, so its odds and EV come out low.
+ */
+export function getUnresolvedBoosterCards(setCode) {
+  return mtgjsonUnresolved.get(String(setCode || '').toUpperCase()) || {};
+}
 
 async function fetchMtgjsonSet(code) {
   const u = code.toUpperCase();
@@ -543,9 +589,17 @@ export async function fetchMtgjsonBooster(setCode) {
       for (const uuid of Object.keys(sheets[sn].cards || {})) allUuids.add(uuid);
     }
   }
-  const externalUuids = [...allUuids].filter(uuid => !cardByUuid.has(uuid));
+  let externalUuids = [...allUuids].filter(uuid => !cardByUuid.has(uuid));
 
-  // 3. Resolve unknowns by fetching candidate subset sets:
+  // 3a. Prebuilt UUID → Scryfall ID lookup (Mystery Booster style sets).
+  const lookedUp = new Map();
+  if (externalUuids.length > 0) {
+    const ids = (await loadExternalIdLookup())[u] || {};
+    for (const uuid of externalUuids) if (ids[uuid]) lookedUp.set(uuid, ids[uuid]);
+    externalUuids = externalUuids.filter(uuid => !lookedUp.has(uuid));
+  }
+
+  // 3b. Resolve remaining unknowns by fetching candidate subset sets:
   //    - Scryfall children (parent_set_code === u)
   //    - Hardcoded SPG-style outsiders
   if (externalUuids.length > 0) {
@@ -559,11 +613,15 @@ export async function fetchMtgjsonBooster(setCode) {
     }
   }
 
+  const scryfallIdFor = (uuid) => {
+    const c = cardByUuid.get(uuid);
+    return (c && c.identifiers && c.identifiers.scryfallId) || lookedUp.get(uuid) || null;
+  };
+
   // 4. Collect all needed Scryfall IDs
   const sfIds = new Set();
   for (const uuid of allUuids) {
-    const c = cardByUuid.get(uuid);
-    const sfId = c && c.identifiers && c.identifiers.scryfallId;
+    const sfId = scryfallIdFor(uuid);
     if (sfId) sfIds.add(sfId);
   }
 
@@ -572,16 +630,16 @@ export async function fetchMtgjsonBooster(setCode) {
 
   // 6. Translate booster definition into a usable model
   const result = {};
+  const unresolved = {};
   for (const btKey of Object.keys(main.booster)) {
     const def = main.booster[btKey];
     const sheets = {};
     for (const [sn, sh] of Object.entries(def.sheets || {})) {
       const entries = [];
       for (const [uuid, weight] of Object.entries(sh.cards || {})) {
-        const mtgj = cardByUuid.get(uuid);
-        const sfId = mtgj && mtgj.identifiers && mtgj.identifiers.scryfallId;
+        const sfId = scryfallIdFor(uuid);
         const sf = sfId ? sfById.get(sfId) : null;
-        if (!sf) continue;
+        if (!sf) { unresolved[btKey] = (unresolved[btKey] || 0) + 1; continue; }
         entries.push({ card: sf, weight: Number(weight) || 0 });
       }
       const totalWeight = sh.totalWeight || entries.reduce((s, e) => s + e.weight, 0);
@@ -599,6 +657,8 @@ export async function fetchMtgjsonBooster(setCode) {
     const totalWeight = def.boostersTotalWeight || variants.reduce((s, v) => s + v.weight, 0);
     result[btKey] = { variants, totalWeight, sheets };
   }
+
+  mtgjsonUnresolved.set(u, unresolved);
 
   console.log(`[MTGJSON] Resolved booster model for ${u}: ${Object.keys(result).join(', ')}`);
   mtgjsonBoosterCache.set(u, result);

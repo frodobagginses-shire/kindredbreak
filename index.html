@@ -1236,6 +1236,10 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     return parseFloat(p.usd) || 0;
   }
 
+  // Mystery Booster 2 and Mystery Booster Commander Edition. (Scryfall has no
+  // set for the original Mystery Booster, so it can't be picked here.)
+  const MYSTERY_BOOSTER_SETS = new Set(['mb2', 'mbc']);
+
   /**
    * Determine which booster types exist for a given set.
    * Based on set release date and type.
@@ -1249,6 +1253,13 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
     // Commander precons don't have standard boosters
     if (setType === 'commander') {
+      return ['Draft Booster'];
+    }
+
+    // Mystery Booster sets come in one pack, which MTGJSON publishes as 'draft'.
+    // Most of its cards are reprints MTGJSON files under other sets; see
+    // js/mtgjson-external-ids.json.
+    if (MYSTERY_BOOSTER_SETS.has(code)) {
       return ['Draft Booster'];
     }
 
@@ -1439,6 +1450,41 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
   const mtgjsonSetCache = new Map();   // upperCode → mtgjson data, or null on miss
   const mtgjsonBoosterCache = new Map(); // upperCode → resolved booster model
+  const mtgjsonUnresolved = new Map();   // upperCode → { boosterKey: sheet entries with no Scryfall match }
+
+  // Some sets' sheets list printings that live outside their own MTGJSON file:
+  // Mystery Booster packs pull reprints from The List (PLST, a very large set
+  // file) and Mystery Booster 2. js/mtgjson-external-ids.json (built by
+  // tools/update_external_ids.py) maps those card UUIDs straight to Scryfall
+  // IDs: { "MBC": { mtgjsonUuid: scryfallId, ... }, ... }. It is only fetched
+  // when a set's sheets reference cards outside its own MTGJSON file.
+  let externalIdLookup = null;
+
+  async function loadExternalIdLookup() {
+    if (!externalIdLookup) {
+      externalIdLookup = (async () => {
+        if (globalThis.__MTGJSON_EXTERNAL_IDS__) return globalThis.__MTGJSON_EXTERNAL_IDS__;
+        try {
+          const res = await fetch('./js/mtgjson-external-ids.json');
+          if (!res.ok) throw new Error(`status ${res.status}`);
+          return await res.json();
+        } catch (e) {
+          console.warn('[MTGJSON] Could not load mtgjson-external-ids.json:', e.message);
+          return {};
+        }
+      })();
+    }
+    return externalIdLookup;
+  }
+
+  /**
+   * Sheet entries per MTGJSON booster key (e.g. { collector: 12 }) that couldn't
+   * be matched to a Scryfall card when the set's model was built. Those cards
+   * never appear in that pack type, so its odds and EV come out low.
+   */
+  function getUnresolvedBoosterCards(setCode) {
+    return mtgjsonUnresolved.get(String(setCode || '').toUpperCase()) || {};
+  }
 
   async function fetchMtgjsonSet(code) {
     const u = code.toUpperCase();
@@ -1519,9 +1565,17 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         for (const uuid of Object.keys(sheets[sn].cards || {})) allUuids.add(uuid);
       }
     }
-    const externalUuids = [...allUuids].filter(uuid => !cardByUuid.has(uuid));
+    let externalUuids = [...allUuids].filter(uuid => !cardByUuid.has(uuid));
 
-    // 3. Resolve unknowns by fetching candidate subset sets:
+    // 3a. Prebuilt UUID → Scryfall ID lookup (Mystery Booster style sets).
+    const lookedUp = new Map();
+    if (externalUuids.length > 0) {
+      const ids = (await loadExternalIdLookup())[u] || {};
+      for (const uuid of externalUuids) if (ids[uuid]) lookedUp.set(uuid, ids[uuid]);
+      externalUuids = externalUuids.filter(uuid => !lookedUp.has(uuid));
+    }
+
+    // 3b. Resolve remaining unknowns by fetching candidate subset sets:
     //    - Scryfall children (parent_set_code === u)
     //    - Hardcoded SPG-style outsiders
     if (externalUuids.length > 0) {
@@ -1535,11 +1589,15 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       }
     }
 
+    const scryfallIdFor = (uuid) => {
+      const c = cardByUuid.get(uuid);
+      return (c && c.identifiers && c.identifiers.scryfallId) || lookedUp.get(uuid) || null;
+    };
+
     // 4. Collect all needed Scryfall IDs
     const sfIds = new Set();
     for (const uuid of allUuids) {
-      const c = cardByUuid.get(uuid);
-      const sfId = c && c.identifiers && c.identifiers.scryfallId;
+      const sfId = scryfallIdFor(uuid);
       if (sfId) sfIds.add(sfId);
     }
 
@@ -1548,16 +1606,16 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
 
     // 6. Translate booster definition into a usable model
     const result = {};
+    const unresolved = {};
     for (const btKey of Object.keys(main.booster)) {
       const def = main.booster[btKey];
       const sheets = {};
       for (const [sn, sh] of Object.entries(def.sheets || {})) {
         const entries = [];
         for (const [uuid, weight] of Object.entries(sh.cards || {})) {
-          const mtgj = cardByUuid.get(uuid);
-          const sfId = mtgj && mtgj.identifiers && mtgj.identifiers.scryfallId;
+          const sfId = scryfallIdFor(uuid);
           const sf = sfId ? sfById.get(sfId) : null;
-          if (!sf) continue;
+          if (!sf) { unresolved[btKey] = (unresolved[btKey] || 0) + 1; continue; }
           entries.push({ card: sf, weight: Number(weight) || 0 });
         }
         const totalWeight = sh.totalWeight || entries.reduce((s, e) => s + e.weight, 0);
@@ -1575,6 +1633,8 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       const totalWeight = def.boostersTotalWeight || variants.reduce((s, v) => s + v.weight, 0);
       result[btKey] = { variants, totalWeight, sheets };
     }
+
+    mtgjsonUnresolved.set(u, unresolved);
 
     console.log(`[MTGJSON] Resolved booster model for ${u}: ${Object.keys(result).join(', ')}`);
     mtgjsonBoosterCache.set(u, result);
@@ -2155,6 +2215,29 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     const key = MTGJSON_BOOSTER_KEYS[boosterType];
     const def = key && mtgjsonBooster ? mtgjsonBooster[key] : null;
     return !!(def && def.variants && def.variants.length);
+  }
+
+  /**
+   * Average cards in one pack of this type under a sheet model (variants
+   * weighted, sheets with no resolved cards skipped), or null if the model
+   * lacks the type. E.g. 20 for Mystery Booster Commander Edition, where the
+   * generic Draft Booster profile would say 15.
+   */
+  function expectedCardsPerPack(mtgjsonBooster, boosterType) {
+    if (!boosterModelHasType(mtgjsonBooster, boosterType)) return null;
+    const def = mtgjsonBooster[MTGJSON_BOOSTER_KEYS[boosterType]];
+    const tw = def.totalWeight || def.variants.reduce((s, v) => s + v.weight, 0);
+    if (!(tw > 0)) return null;
+    let n = 0;
+    for (const v of def.variants) {
+      let cards = 0;
+      for (const [sheetName, count] of Object.entries(v.contents || {})) {
+        const sheet = def.sheets[sheetName];
+        if (sheet && sheet.entries && sheet.entries.length) cards += count;
+      }
+      n += (v.weight / tw) * cards;
+    }
+    return n;
   }
 
   /**
@@ -4849,6 +4932,16 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
     updateButtonStates();
   }
 
+  /**
+   * Cards in one pack of a booster roster entry: from its MTGJSON or
+   * official-odds sheets once loaded, else the generic profile's pack size.
+   */
+  function packCardCount(entry) {
+    const useModel = entry.mtgjsonBooster && entry.modelSource !== 'generic';
+    const n = useModel ? expectedCardsPerPack(entry.mtgjsonBooster, entry.boosterType) : null;
+    return n ? Math.round(n) : getPackCardCount(entry.boosterType);
+  }
+
   function renderRoster() {
     dom.rosterTbody.innerHTML = '';
     dom.rosterEmpty.classList.toggle('hidden', state.roster.length > 0);
@@ -4874,7 +4967,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
         typeLabel = `${escHtml(entry.setName)} <span style="color:var(--text-muted)">(${escHtml(entry.setCode)})</span>`;
         packLabel = entry.boosterType;
         cardsLabel = entry.status === 'cached'
-          ? entry.quantity * getPackCardCount(entry.boosterType)
+          ? entry.quantity * packCardCount(entry)
           : '—';
         statusText = entry.status === 'cached'
           ? `✓ ${entry.cards?.length || 0} cards`
@@ -4929,7 +5022,7 @@ label { display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-s
       if (r.status !== 'cached') return sum;
       if (r.productType === 'secret_lair') return sum + r.quantity * r.dropCards.length;
       if (r.productType === 'commander_precon') return sum + r.quantity * r.deckCards.length;
-      return sum + r.quantity * getPackCardCount(r.boosterType);
+      return sum + r.quantity * packCardCount(r);
     }, 0);
     dom.totalPacks.textContent = `Total Products: ${totalUnits}`;
     dom.totalCardsEst.textContent = `Est. Cards: ${totalCards}`;
