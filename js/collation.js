@@ -152,6 +152,29 @@ export function boosterModelHasType(mtgjsonBooster, boosterType) {
 }
 
 /**
+ * Average cards in one pack of this type under a sheet model (variants
+ * weighted, sheets with no resolved cards skipped), or null if the model
+ * lacks the type. E.g. 20 for Mystery Booster Commander Edition, where the
+ * generic Draft Booster profile would say 15.
+ */
+export function expectedCardsPerPack(mtgjsonBooster, boosterType) {
+  if (!boosterModelHasType(mtgjsonBooster, boosterType)) return null;
+  const def = mtgjsonBooster[MTGJSON_BOOSTER_KEYS[boosterType]];
+  const tw = def.totalWeight || def.variants.reduce((s, v) => s + v.weight, 0);
+  if (!(tw > 0)) return null;
+  let n = 0;
+  for (const v of def.variants) {
+    let cards = 0;
+    for (const [sheetName, count] of Object.entries(v.contents || {})) {
+      const sheet = def.sheets[sheetName];
+      if (sheet && sheet.entries && sheet.entries.length) cards += count;
+    }
+    n += (v.weight / tw) * cards;
+  }
+  return n;
+}
+
+/**
  * Expected-count distribution of every card a pack of this type can contain.
  * Returns [{ card, probability, isFoil }, ...], one row per (print, finish).
  *

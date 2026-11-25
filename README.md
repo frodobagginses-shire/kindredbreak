@@ -15,9 +15,12 @@ A single-page tool for planning and running Kindred (formerly "Tribal") breaks: 
 | `js/simulation.js` | Spot matching, EV by spot, seeding and auto-tabulate. |
 | `js/app.js` | UI. |
 | `js/sld-drops.json` | Secret Lair collector number to drop name lookup (from MTGJSON). |
+| `js/mtgjson-external-ids.json` | MTGJSON card ID to Scryfall ID lookup for booster cards MTGJSON files under other sets (Mystery Booster 2 and Commander Edition). Fetched only when a set needs it. |
 | `js/demo-preload.json` | Frozen data for the "Load Demo Break" button. |
 | `build.py` | Bundles `js/` into `index.html`. |
 | `tools/update_sld_drops.py` | Regenerates `js/sld-drops.json` from MTGJSON. |
+| `tools/update_external_ids.py` | Adds or refreshes sets in `js/mtgjson-external-ids.json`. |
+| `tools/pack_report.mjs` | Prints the pack model, cards per pack and EV the site would use for given sets. |
 
 ## Building
 
@@ -40,7 +43,7 @@ Then open http://localhost:8000/.
 
 Each roster row shows a badge for its pack model:
 
-- **MTGJSON**: MTGJSON's booster sheets, the real WotC collation. Used whenever MTGJSON has published the set.
+- **MTGJSON**: MTGJSON's booster sheets, the real WotC collation. Used whenever MTGJSON has published the set. Sheet cards are matched to Scryfall through the set's own MTGJSON file, its Scryfall child sets and SPG. Mystery Booster packs pull most of their reprints from The List (`PLST`, too large to load in the browser) and Mystery Booster 2, so those are matched through `js/mtgjson-external-ids.json`. If `pack_report` warns that sheet cards have no Scryfall match, add the set with `python3 tools/update_external_ids.py <CODE>`. That script downloads MTGJSON's bulk identifier table (about 11 MB), not just per-set files.
 - **Official odds**: sheets rebuilt from Wizards' "Collecting <set>" article, for sets MTGJSON hasn't covered yet. Specs live in `js/booster-models.js`; the site switches to MTGJSON automatically once it publishes the set, after which the spec can be deleted.
 - **Estimate**: a generic modern pack profile (`PACK_PROFILES` in `js/collation.js`) drawn from the set's main-set cards.
 
